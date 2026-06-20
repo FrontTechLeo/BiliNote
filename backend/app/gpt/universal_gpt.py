@@ -1,3 +1,5 @@
+import logging
+
 from app.gpt.base import GPT
 from app.gpt.prompt_builder import generate_base_prompt
 from app.models.gpt_model import GPTSource
@@ -6,6 +8,8 @@ import hashlib
 import json
 import time
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 
 from app.gpt.prompt import BASE_PROMPT, AI_SUM, SCREENSHOT, LINK, MERGE_PROMPT
@@ -253,6 +257,9 @@ class UniversalGPT(GPT):
                         self._save_checkpoint(checkpoint_key, source_signature, current_partials, "merge")
                     raise
 
+                if not response.choices or response.choices[0].message.content is None:
+                    logger.error("合并阶段 LLM 返回无效响应: %s", response)
+                    raise ValueError("LLM 合并阶段返回无效响应")
                 new_partials.append(response.choices[0].message.content.strip())
 
                 if checkpoint_key and source_signature:
@@ -325,7 +332,23 @@ class UniversalGPT(GPT):
                     self._save_checkpoint(checkpoint_key, source_signature, partials, "summarize")
                 raise
 
-            partials.append(response.choices[0].message.content.strip())
+            if not response.choices:
+                logger.error(
+                    "LLM 返回空 choices，模型=%s，响应=%s",
+                    self.model,
+                    response.model_dump_json() if hasattr(response, 'model_dump_json') else str(response),
+                )
+                raise ValueError(f"LLM 返回空 choices（模型 {self.model}），可能是 API Key 或无对应模型权限")
+            content = response.choices[0].message.content
+            if content is None:
+                finish_reason = response.choices[0].finish_reason
+                logger.error(
+                    "LLM 返回 content=None，模型=%s，finish_reason=%s，响应=%s",
+                    self.model, finish_reason,
+                    response.model_dump_json() if hasattr(response, 'model_dump_json') else str(response),
+                )
+                raise ValueError(f"LLM 返回 content=None（模型 {self.model}，finish_reason={finish_reason}）")
+            partials.append(content.strip())
             if checkpoint_key and source_signature:
                 self._save_checkpoint(checkpoint_key, source_signature, partials, "summarize")
 

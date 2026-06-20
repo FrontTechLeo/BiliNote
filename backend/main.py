@@ -1,4 +1,5 @@
 import os
+import sys
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -7,6 +8,9 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.staticfiles import StaticFiles
 from dotenv import load_dotenv
+
+# stdout 设为行缓冲，避免控制台日志卡住不刷新
+sys.stdout.reconfigure(line_buffering=True)
 
 from app.db.init_db import init_db
 from app.db.provider_dao import seed_default_providers

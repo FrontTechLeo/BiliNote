@@ -12,15 +12,23 @@ formatter = logging.Formatter(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-# 控制台输出
-console_handler = logging.StreamHandler(sys.stdout)
+
+class _FlushHandler(logging.StreamHandler):
+    """写入后立即 flush stdout，防止日志积压不显示。"""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
+
+# 控制台输出（每条日志后自动 flush）
+console_handler = _FlushHandler(sys.stdout)
 console_handler.setFormatter(formatter)
 
 # 文件输出
 file_handler = logging.FileHandler(LOG_DIR / "app.log", encoding="utf-8")
 file_handler.setFormatter(formatter)
 
-# 获取日志器
 
 def get_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)

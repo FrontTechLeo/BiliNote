@@ -47,7 +47,7 @@ class WhisperTranscriber(Transcriber):
             if device == 'cuda' and self.device == 'cpu':
                 print('没有 cuda 使用 cpu进行计算')
 
-        self.compute_type = compute_type or ("float16" if self.device == "cuda" else "int8")
+        self.compute_type = compute_type or ("float32" if self.device == "cuda" else "int8")
         self.model_size = model_size
 
         model_dir = get_model_dir("whisper")

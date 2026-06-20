@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 
 class BilibiliDownloader(Downloader, ABC):
+    # 现代浏览器 User-Agent，避免 B站 CDN 412 拦截
+    _BILIBILI_HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Referer': 'https://www.bilibili.com',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    }
+
     def __init__(self):
         super().__init__()
         self._cookie_mgr = CookieConfigManager()
@@ -59,7 +67,7 @@ class BilibiliDownloader(Downloader, ABC):
         ydl_opts = {
             'format': 'bestaudio[ext=m4a]/bestaudio/best',
             'outtmpl': output_path,
-            'http_headers': {'Referer': 'https://www.bilibili.com'},
+            'http_headers': self._BILIBILI_HEADERS.copy(),
             'postprocessors': [
                 {
                     'key': 'FFmpegExtractAudio',
@@ -118,7 +126,7 @@ class BilibiliDownloader(Downloader, ABC):
         ydl_opts = {
             'format': 'bv*[ext=mp4]/bestvideo+bestaudio/best',
             'outtmpl': output_path,
-            'http_headers': {'Referer': 'https://www.bilibili.com'},
+            'http_headers': self._BILIBILI_HEADERS.copy(),
             'noplaylist': True,
             'quiet': False,
             'merge_output_format': 'mp4',  # 确保合并成 mp4
@@ -189,7 +197,7 @@ class BilibiliDownloader(Downloader, ABC):
         # 通过 CookieConfigManager 注入 B站 Cookie（Netscape cookiefile）
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
-            ydl_opts['http_headers'] = {'Referer': 'https://www.bilibili.com'}
+            ydl_opts['http_headers'] = self._BILIBILI_HEADERS.copy()
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
