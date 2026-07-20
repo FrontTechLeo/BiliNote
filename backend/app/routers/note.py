@@ -1,10 +1,14 @@
 # app/routers/note.py
+import io
 import json
 import os
+import re
+import tempfile
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
 from pydantic import BaseModel, validator, field_validator
@@ -20,7 +24,7 @@ from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id
 from app.validators.video_url_validator import is_supported_video_url
 from fastapi import APIRouter, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response, FileResponse
 import httpx
 from app.enmus.task_status_enums import TaskStatus
 
@@ -319,3 +323,143 @@ async def image_proxy(request: Request, url: str):
             )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- 导出笔记（含截图时打包为 zip） ----------
+
+# 匹配已替换的截图引用，如 ![](/static/screenshots/xxx.jpg)
+_SCREENSHOT_REF_RE = re.compile(r'!\[([^\]]*)\]\(/static/screenshots/([^)]+)\)')
+
+# 匹配原始截图标记，如 *Screenshot-[04:45] 或 Screenshot-04:45
+_RAW_MARKER_RE = re.compile(r'\*?Screenshot-(?:\[(\d{2}):(\d{2})\]|(\d{2}):(\d{2}))')
+
+
+def _find_video_file(video_id: str) -> Optional[Path]:
+    """根据 video_id 在 data/data/ 目录下查找已下载的视频文件。"""
+    data_dir = Path("data/data")
+    for ext in (".mp4", ".mkv", ".flv", ".webm"):
+        candidate = data_dir / f"{video_id}{ext}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+@router.get("/export_note/{task_id}")
+def export_note(task_id: str):
+    """
+    导出笔记。如果 markdown 包含截图引用（已替换或原始标记），则打包为 zip（含 screenshots/ 子目录），
+    否则直接返回单个 .md 文件。
+    """
+    from app.utils.screenshot_marker import extract_screenshot_timestamps
+    from app.utils.video_helper import generate_screenshot
+
+    # 安全校验：task_id 只允许字母数字和短横线
+    if not task_id or not re.match(r'^[a-zA-Z0-9\-]+$', task_id):
+        raise HTTPException(status_code=400, detail="无效的 task_id")
+
+    # 优先从 JSON 结果读取（包含 post-processing 后的最终 markdown）
+    result_path = Path(NOTE_OUTPUT_DIR) / f"{task_id}.json"
+    markdown_path = Path(NOTE_OUTPUT_DIR) / f"{task_id}_markdown.md"
+    markdown_text = ""
+
+    if result_path.exists():
+        try:
+            result_data = json.loads(result_path.read_text(encoding="utf-8"))
+            markdown_text = result_data.get("markdown", "")
+        except Exception:
+            pass
+
+    # 回退：从 markdown 缓存文件读取（可能不含 post-processing 结果）
+    if not markdown_text and markdown_path.exists():
+        markdown_text = markdown_path.read_text(encoding="utf-8")
+
+    if not markdown_text:
+        raise HTTPException(status_code=404, detail="笔记不存在")
+
+    # 读取音频元信息以获取标题和 video_id
+    audio_meta_path = Path(NOTE_OUTPUT_DIR) / f"{task_id}_audio.json"
+    title = "note"
+    video_id = ""
+    if audio_meta_path.exists():
+        try:
+            meta = json.loads(audio_meta_path.read_text(encoding="utf-8"))
+            title = meta.get("title", title)
+            video_id = meta.get("video_id", "")
+        except Exception:
+            pass
+
+    safe_title = re.sub(r'[\\/:*?"<>|]', '_', title).strip() or "note"
+
+    screenshots_dir = Path("static/screenshots")
+    image_filenames = []  # 要打包的截图文件名列表
+    rewritten_md = markdown_text
+
+    # 情况1：已有 ![](/static/screenshots/...) 引用（post-processing 已执行）
+    if _SCREENSHOT_REF_RE.search(markdown_text):
+        rewritten_md = _SCREENSHOT_REF_RE.sub(r'![\1](screenshots/\2)', markdown_text)
+        image_filenames = list(set(fn for _, fn in _SCREENSHOT_REF_RE.findall(markdown_text)))
+
+    # 情况2：有原始 *Screenshot-[mm:ss]* 标记（post-processing 未执行，需要现场生成截图）
+    elif _RAW_MARKER_RE.search(markdown_text):
+        # 查找视频文件
+        video_path = _find_video_file(video_id)
+        if not video_path:
+            raise HTTPException(status_code=404, detail=f"视频文件不存在（video_id={video_id}），无法生成截图")
+
+        # 从标记中提取时间戳并生成截图
+        timestamps = extract_screenshot_timestamps(markdown_text)
+        tmp_dir = Path(tempfile.mkdtemp(prefix="bili_export_"))
+        for idx, (marker, ts) in enumerate(timestamps):
+            try:
+                img_path = generate_screenshot(str(video_path), str(tmp_dir), ts, idx)
+                filename = Path(img_path).name
+                image_filenames.append(filename)
+                # 替换标记为相对路径引用（只替换第一个匹配）
+                rewritten_md = rewritten_md.replace(
+                    marker, f"![](screenshots/{filename})", 1
+                )
+            except Exception as exc:
+                logger.warning(f"导出截图生成失败 (ts={ts}s): {exc}")
+                # 生成失败时保留原始标记
+                continue
+
+        # 更新截图目录为临时目录（生成的截图在这里）
+        screenshots_dir = tmp_dir
+
+    # 如果有截图，打包为 zip
+    if image_filenames:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(f"{safe_title}.md", rewritten_md.encode("utf-8"))
+            for filename in image_filenames:
+                img_path = screenshots_dir / filename
+                if img_path.exists():
+                    zf.write(img_path, f"screenshots/{filename}")
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+        tmp.write(zip_buffer.getvalue())
+        tmp.close()
+        encoded_name = quote(f"{safe_title}.zip")
+        return FileResponse(
+            path=tmp.name,
+            media_type="application/zip",
+            filename=f"{safe_title}.zip",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+                "Content-Encoding": "identity",
+            },
+        )
+    else:
+        # 无截图，直接返回 .md 文件
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".md")
+        tmp.write(rewritten_md.encode("utf-8"))
+        tmp.close()
+        encoded_name = quote(f"{safe_title}.md")
+        return FileResponse(
+            path=tmp.name,
+            media_type="text/markdown; charset=utf-8",
+            filename=f"{safe_title}.md",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+            },
+        )

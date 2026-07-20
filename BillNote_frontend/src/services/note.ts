@@ -1,4 +1,5 @@
 import request from '@/utils/request'
+import axios from 'axios'
 import toast from 'react-hot-toast'
 
 export const generateNote = async (data: {
@@ -72,4 +73,12 @@ export const get_task_status = async (task_id: string) => {
 
     throw e // 抛出错误以便调用方处理
   }
+}
+
+export const exportNote = async (taskId: string): Promise<Blob> => {
+  const baseURL = import.meta.env.VITE_API_BASE_URL || '/api'
+  const response = await axios.get(`${baseURL}/export_note/${taskId}`, {
+    responseType: 'blob',
+  })
+  return response.data
 }

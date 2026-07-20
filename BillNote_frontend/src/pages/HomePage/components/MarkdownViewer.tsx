@@ -19,6 +19,7 @@ import 'katex/dist/katex.min.css'
 import 'github-markdown-css/github-markdown-light.css'
 import { ScrollArea } from '@/components/ui/scroll-area.tsx'
 import { useTaskStore } from '@/store/taskStore'
+import { exportNote } from '@/services/note.ts'
 import { noteStyles } from '@/constant/note.ts'
 import { MarkdownHeader } from '@/pages/HomePage/components/MarkdownHeader.tsx'
 import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
@@ -403,16 +404,150 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       URL.revokeObjectURL(url)
     },
   }
-  const handleDownload = () => {
+  const handleDownload = async () => {
     const task = getCurrentTask()
     const name = task?.audioMeta.title || 'note'
-    const blob = new Blob([selectedContent], { type: 'text/markdown;charset=utf-8' })
-    const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob)
-    link.download = `${name}.md`
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
+    // 检测截图：已替换的引用 或 原始标记
+    const hasScreenshots = selectedContent.includes('/static/screenshots/') || /Screenshot-\[?\d{2}:\d{2}\]?/.test(selectedContent)
+
+    if (hasScreenshots && task?.id) {
+      // 含截图：调用后端接口下载 zip（markdown + screenshots 文件夹）
+      try {
+        const blob = await exportNote(task.id)
+        const link = document.createElement('a')
+        link.href = URL.createObjectURL(blob)
+        link.download = `${name}.zip`
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(link.href)
+      } catch {
+        toast.error('导出失败，请稍后重试')
+      }
+    } else {
+      // 无截图：保持原有纯前端下载逻辑
+      const blob = new Blob([selectedContent], { type: 'text/markdown;charset=utf-8' })
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = `${name}.md`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+    }
+  }
+
+  const handleExportHtml = async () => {
+    const task = getCurrentTask()
+    const name = task?.audioMeta.title || 'note'
+    toast.loading('正在生成 HTML…', { id: 'export-html' })
+
+    try {
+      // 1. 提取所有图片 URL
+      const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g
+      const imageUrls: string[] = []
+      let match: RegExpExecArray | null
+      while ((match = imgRegex.exec(selectedContent)) !== null) {
+        let url = match[2]
+        if (url.startsWith('/')) url = baseURL + url
+        imageUrls.push(url)
+      }
+
+      // 2. 获取图片 base64
+      const imageMap = new Map<string, string>()
+      await Promise.all(
+        imageUrls.map(async (url) => {
+          try {
+            const resp = await fetch(url)
+            const blob = await resp.blob()
+            const base64 = await new Promise<string>((resolve) => {
+              const reader = new FileReader()
+              reader.onloadend = () => resolve(reader.result as string)
+              reader.readAsDataURL(blob)
+            })
+            imageMap.set(url, base64)
+          } catch { /* 跳过获取失败的图片 */ }
+        })
+      )
+
+      // 3. Markdown → HTML 转换
+      let html = selectedContent
+        // 代码块
+        .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>')
+        // 标题
+        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+        // 粗体 + 斜体
+        .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        // 行内代码
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        // 图片（替换为 base64）
+        .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, src) => {
+          let realSrc = src.startsWith('/') ? baseURL + src : src
+          const b64 = imageMap.get(realSrc) || realSrc
+          return `<div style="text-align:center;margin:16px 0"><img src="${b64}" alt="${alt}" style="max-width:100%;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1)" /></div>`
+        })
+        // 链接
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+        // 水平线
+        .replace(/^---+$/gm, '<hr />')
+        // 无序列表
+        .replace(/^\* (.+)$/gm, '<li>$1</li>')
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        // 有序列表
+        .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+        // 段落（连续两个换行）
+        .replace(/\n\n/g, '</p><p>')
+        // 单换行
+        .replace(/\n/g, '<br />')
+
+      html = `<p>${html}</p>`
+      // 合并连续 li 为 ul
+      html = html.replace(/(<li>.*?<\/li>)+/gs, (m) => `<ul>${m}</ul>`)
+
+      // 4. 构建完整 HTML 文档
+      const fullHtml = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${name}</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 40px 20px; line-height: 1.8; color: #333; }
+  h1 { font-size: 1.8em; border-bottom: 2px solid #eee; padding-bottom: 8px; }
+  h2 { font-size: 1.4em; margin-top: 1.5em; }
+  h3 { font-size: 1.2em; }
+  pre { background: #f5f5f5; padding: 16px; border-radius: 8px; overflow-x: auto; }
+  code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+  pre code { background: none; padding: 0; }
+  ul { padding-left: 1.5em; }
+  li { margin: 4px 0; }
+  hr { border: none; border-top: 1px solid #eee; margin: 24px 0; }
+  a { color: #1a73e8; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  blockquote { border-left: 4px solid #ddd; margin: 0; padding: 8px 16px; color: #666; background: #fafafa; }
+</style>
+</head>
+<body>
+${html}
+</body>
+</html>`
+
+      // 5. 下载
+      const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8' })
+      const link = document.createElement('a')
+      link.href = URL.createObjectURL(blob)
+      link.download = `${name}.html`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(link.href)
+      toast.success('HTML 导出成功', { id: 'export-html' })
+    } catch {
+      toast.error('HTML 导出失败', { id: 'export-html' })
+    }
   }
 
   if (status === 'loading') {
@@ -468,6 +603,7 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
         noteStyles={noteStyles}
         onCopy={handleCopy}
         onDownload={handleDownload}
+        onExportHtml={handleExportHtml}
         createAt={createTime}
         showTranscribe={showTranscribe}
         setShowTranscribe={setShowTranscribe}

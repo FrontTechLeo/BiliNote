@@ -200,8 +200,36 @@ class UniversalGPT(GPT):
             or "only the default" in raw
         )
 
+    @staticmethod
+    def _is_image_input_unsupported_error(exc: Exception) -> bool:
+        """模型不支持图片输入时返回 True（404 且包含 image 相关关键词）。"""
+        status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+        if status != 404:
+            return False
+        raw = str(exc).lower()
+        return "image" in raw
+
+    @staticmethod
+    def _strip_images_from_messages(messages: list) -> list:
+        """把多模态 content 数组退化为纯文本 string，兼容不支持图片的模型。"""
+        stripped = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                # 只保留 type=text 的部分，拼成纯字符串
+                text_parts = [
+                    part["text"] for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ]
+                new_msg = {**msg, "content": "\n".join(text_parts)}
+                stripped.append(new_msg)
+            else:
+                stripped.append(msg)
+        return stripped
+
     def _do_create(self, messages: list):
         """单次调用。如果模型拒绝自定义 temperature，就地去掉该参数再试一次
+        如果模型不支持图片输入，去掉图片内容再试一次
         （不消耗外层的重试次数预算），仍失败则把异常抛给外层重试逻辑。"""
         try:
             return self.client.chat.completions.create(
@@ -215,6 +243,14 @@ class UniversalGPT(GPT):
                 return self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
+                )
+            if self._is_image_input_unsupported_error(exc):
+                print(f"[universal_gpt] 模型 {self.model} 不支持图片输入，去掉图片后重试")
+                stripped_messages = self._strip_images_from_messages(messages)
+                return self.client.chat.completions.create(
+                    model=self.model,
+                    messages=stripped_messages,
+                    temperature=self.temperature,
                 )
             raise
 

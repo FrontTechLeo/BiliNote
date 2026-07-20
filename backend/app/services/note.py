@@ -398,7 +398,37 @@ class NoteGenerator:
             logger.info(f"检测到音频缓存 ({audio_cache_file})，直接读取")
             try:
                 data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
-                return AudioDownloadResult(**data)
+                audio = AudioDownloadResult(**data)
+
+                # 即使音频有缓存，如果需要截图/视频理解，仍需确保视频已下载
+                need_video = screenshot or video_understanding
+                if need_video and self.video_path is None:
+                    if screenshot and not grid_size:
+                        grid_size = [2, 2]
+                    frame_interval = video_interval if video_interval and video_interval > 0 else 6
+                    try:
+                        logger.info("音频缓存命中，但需要截图/视频理解，开始下载视频")
+                        video_path_str = downloader.download_video(video_url)
+                        self.video_path = Path(video_path_str)
+                        logger.info(f"视频下载完成：{self.video_path}")
+
+                        if grid_size:
+                            self.video_img_urls = VideoReader(
+                                video_path=str(self.video_path),
+                                grid_size=tuple(grid_size),
+                                frame_interval=frame_interval,
+                                unit_width=960,
+                                unit_height=540,
+                                save_quality=80,
+                            ).run()
+                        else:
+                            logger.info("未指定 grid_size，跳过缩略图生成")
+                    except Exception as exc:
+                        logger.error(f"视频下载失败（截图/视频理解）：{exc}")
+                        self._handle_exception(task_id, exc)
+                        raise
+
+                return audio
             except Exception as e:
                 logger.warning(f"读取音频缓存失败，将重新下载：{e}")
 
