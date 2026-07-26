@@ -9,12 +9,13 @@ import {
 } from '@/services/model'
 
 interface IModel {
-  id: string
-  created: number
-  object: string
-  owned_by: string
-  permission: string
-  root: string
+  id: string | null
+  model_name?: string | null
+  created?: number | null
+  object?: string | null
+  owned_by?: string | null
+  permission?: string
+  root?: string
 }
 
 interface IModelListItem {

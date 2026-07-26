@@ -30,6 +30,29 @@ class TestScreenshotMarker(unittest.TestCase):
             ],
         )
 
+    def test_extract_wrapped_image_format(self):
+        """LLM sometimes wraps the marker inside image syntax: ![alt](*Screenshot-[mm:ss]*)"""
+        markdown = "![AI 生成内容示例](*Screenshot-[00:06]*)"
+        matches = extract_screenshot_timestamps(markdown)
+        self.assertEqual(matches, [("![AI 生成内容示例](*Screenshot-[00:06]*)", 6)])
+
+    def test_extract_mixed_wrapped_and_standalone(self):
+        """Wrapped and standalone markers should coexist, returned in document order."""
+        markdown = (
+            "![alt1](*Screenshot-[00:06]*)\n"
+            "*Screenshot-[01:00]\n"
+            "![alt2](*Screenshot-[03:00]*)"
+        )
+        matches = extract_screenshot_timestamps(markdown)
+        self.assertEqual(
+            matches,
+            [
+                ("![alt1](*Screenshot-[00:06]*)", 6),
+                ("*Screenshot-[01:00]", 60),
+                ("![alt2](*Screenshot-[03:00]*)", 180),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

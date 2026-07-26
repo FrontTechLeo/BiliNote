@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any
@@ -680,13 +681,17 @@ class NoteGenerator:
 
         return markdown
 
-    def _insert_screenshots(self, markdown: str, video_path: Path) -> str | None | Any:
+    def _insert_screenshots(self, markdown: str, video_path: Path) -> str:
         """
         扫描 Markdown 文本中所有 Screenshot 标记，并替换为实际生成的截图链接。
 
-        :param markdown: 含有 *Screenshot-mm:ss 或 Screenshot-[mm:ss] 标记的 Markdown 文本
+        支持两种标记格式：
+        - 独立标记：*Screenshot-[mm:ss]
+        - 被 LLM 包裹为图片链接：![alt](*Screenshot-[mm:ss]*)
+
+        :param markdown: 含有 Screenshot 标记的 Markdown 文本
         :param video_path: 本地视频文件路径
-        :return: 替换后的 Markdown 字符串
+        :return: 替换后的 Markdown 字符串（单张截图失败时保留原标记，继续处理其余）
         """
         matches: List[Tuple[str, int]] = extract_screenshot_timestamps(markdown)
         for idx, (marker, ts) in enumerate(matches):
@@ -695,11 +700,16 @@ class NoteGenerator:
                 filename = Path(img_path).name
                 # 构建前端可访问的 URL，例如 /static/screenshots/{filename}
                 img_url = f"{IMAGE_BASE_URL.rstrip('/')}/{filename}"
-                markdown = markdown.replace(marker, f"![]({img_url})", 1)
+
+                # 从被包裹的标记中提取 alt text，例如 ![Gemini 报告展示](*Screenshot-[03:00]*)
+                alt_match = re.match(r"!\[([^\]]*)\]\(", marker)
+                alt_text = alt_match.group(1) if alt_match else ""
+
+                markdown = markdown.replace(marker, f"![{alt_text}]({img_url})", 1)
             except Exception as exc:
-                logger.error(f"生成截图失败 (timestamp={ts})：{exc}")
-                # self._handle_exception(task_id, exc)
-                return None
+                logger.error(f"生成截图失败 (timestamp={ts})，跳过该截图：{exc}")
+                # 单张失败时保留原始标记，继续处理其余截图
+                continue
         return markdown
 
     @staticmethod

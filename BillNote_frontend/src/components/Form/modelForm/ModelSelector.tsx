@@ -21,9 +21,12 @@ export function ModelSelector({ providerId }: ModelSelectorProps) {
   const [search, setSearch] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
+  const getModelId = (model: { id: string | null; model_name?: string | null }) =>
+    model.id || model.model_name || ''
+
   const filteredModels = models.filter(model => {
     const keywords = search.trim().toLowerCase().split(/\s+/)
-    const target = model.id.toLowerCase()
+    const target = getModelId(model).toLowerCase()
     return keywords.every(kw => target.includes(kw))
   })
 
@@ -76,11 +79,14 @@ export function ModelSelector({ providerId }: ModelSelectorProps) {
               className="h-8"
             />
           </div>
-          {filteredModels.map((model, index) => (
-            <SelectItem key={`${model.id}-${index}`} value={model.id}>
-              {model.id}
-            </SelectItem>
-          ))}
+          {filteredModels.map((model, index) => {
+            const modelId = getModelId(model)
+            return (
+              <SelectItem key={`${modelId}-${index}`} value={modelId}>
+                {modelId}
+              </SelectItem>
+            )
+          })}
         </SelectContent>
       </Select>
 
