@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 import tempfile
 from abc import ABC
 from typing import Union, Optional, List
@@ -33,16 +34,52 @@ class BilibiliDownloader(Downloader, ABC):
         self._cookie = self._cookie_mgr.get('bilibili')
         self._cookiefile = self._write_netscape_cookie_file()
 
+    def _refresh_cookie(self) -> None:
+        """Reload the configured cookie so settings changes apply without a restart."""
+        cookie = self._cookie_mgr.get('bilibili') or ''
+        if cookie == (self._cookie or '') and (
+            not cookie or (self._cookiefile and os.path.exists(self._cookiefile))
+        ):
+            return
+        if self._cookiefile:
+            try:
+                os.remove(self._cookiefile)
+            except OSError:
+                pass
+        self._cookie = cookie
+        self._cookiefile = self._write_netscape_cookie_file()
+
+    @staticmethod
+    def _cookie_pairs(cookie: str) -> list[tuple[str, str]]:
+        """Parse browser-exported Cookie headers into name/value pairs."""
+        raw = (cookie or '').strip()
+        if raw.lower().startswith('cookie:'):
+            raw = raw.split(':', 1)[1].strip()
+        pairs = []
+        for item in re.split(r';\s*|\r?\n+', raw):
+            item = item.strip()
+            if not item or '=' not in item:
+                continue
+            key, value = item.split('=', 1)
+            key, value = key.strip(), value.strip()
+            if key:
+                pairs.append((key, value))
+        return pairs
+
     def _write_netscape_cookie_file(self) -> Optional[str]:
         """将 Cookie 写入 Netscape 格式临时文件，返回文件路径（供 yt-dlp cookiefile 使用）"""
         if not self._cookie:
             logger.warning("B站 Cookie 未配置，下载可能失败")
             return None
         lines = ["# Netscape HTTP Cookie File\n"]
-        for pair in self._cookie.split("; "):
-            if "=" in pair:
-                key, value = pair.split("=", 1)
-                lines.append(f".bilibili.com\tTRUE\t/\tFALSE\t0\t{key}\t{value}\n")
+        pairs = self._cookie_pairs(self._cookie)
+        if pairs and not any(key.lower() == 'sessdata' for key, _ in pairs):
+            logger.warning("B站 Cookie 未包含 SESSDATA，登录字幕和部分受限视频可能不可用")
+        for key, value in pairs:
+            lines.append(f".bilibili.com\tTRUE\t/\tTRUE\t0\t{key}\t{value}\n")
+        if len(lines) == 1:
+            logger.warning("B站 Cookie 格式无法解析，下载可能失败")
+            return None
         tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
         tmp.writelines(lines)
         tmp.close()
@@ -56,6 +93,7 @@ class BilibiliDownloader(Downloader, ABC):
         quality: DownloadQuality = "fast",
         need_video:Optional[bool]=False
     ) -> AudioDownloadResult:
+        self._refresh_cookie()
         if output_dir is None:
             output_dir = get_data_dir()
         if not output_dir:
@@ -109,6 +147,7 @@ class BilibiliDownloader(Downloader, ABC):
         下载视频，返回视频文件路径
         """
 
+        self._refresh_cookie()
         if output_dir is None:
             output_dir = get_data_dir()
         os.makedirs(output_dir, exist_ok=True)
@@ -164,6 +203,7 @@ class BilibiliDownloader(Downloader, ABC):
         :param langs: 优先语言列表
         :return: TranscriptResult 或 None
         """
+        self._refresh_cookie()
         # 1) 优先走 B 站官方 player API（直拉，无需下视频；AI 字幕需 SESSDATA cookie）
         try:
             result = BilibiliSubtitleFetcher().fetch_subtitles(video_url)
@@ -192,12 +232,12 @@ class BilibiliDownloader(Downloader, ABC):
             'skip_download': True,
             'outtmpl': os.path.join(output_dir, f'{video_id}.%(ext)s'),
             'quiet': True,
+            'http_headers': self._BILIBILI_HEADERS.copy(),
         }
 
         # 通过 CookieConfigManager 注入 B站 Cookie（Netscape cookiefile）
         if self._cookiefile:
             ydl_opts['cookiefile'] = self._cookiefile
-            ydl_opts['http_headers'] = self._BILIBILI_HEADERS.copy()
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:

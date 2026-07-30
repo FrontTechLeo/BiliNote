@@ -51,6 +51,18 @@ services:
     restart: unless-stopped
     mem_limit: 512m
 
+  admin:
+    container_name: bilinote-admin
+    build:
+      context: .
+      dockerfile: BillNote_admin/Dockerfile
+      args:
+        BASE_REGISTRY: ${BASE_REGISTRY:-docker.io}
+    expose:
+      - "80"
+    restart: unless-stopped
+    mem_limit: 512m
+
   nginx:
     container_name: bilinote-nginx
     image: nginx:1.25-alpine
@@ -62,6 +74,8 @@ services:
       backend:
         condition: service_healthy
       frontend:
+        condition: service_started
+      admin:
         condition: service_started
     restart: unless-stopped
     mem_limit: 256m

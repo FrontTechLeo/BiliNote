@@ -338,6 +338,14 @@ class NoteGenerator:
             # Atomic rename operation
             temp_file.replace(status_file)
 
+            # Batch tasks reuse the normal generation pipeline.  Mirror each
+            # stage into their persistent child-task history when applicable.
+            try:
+                from app.services.batch_task_service import batch_task_service
+                batch_task_service.sync_child_status(task_id, data["status"], message)
+            except Exception as sync_error:
+                logger.debug("同步批量任务状态失败: %s", sync_error)
+
             print(f"状态文件写入成功: {status_file}")
         except Exception as e:
             logger.error(f"写入状态文件失败 (task_id={task_id})：{e}")

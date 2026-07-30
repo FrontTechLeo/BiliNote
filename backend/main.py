@@ -65,6 +65,8 @@ async def lifespan(app: FastAPI):
         seed_default_providers()
 
         logger.info("[startup 5/5] 启动完成，等待请求")
+        from app.services.batch_task_service import batch_task_service
+        batch_task_service.recover_incomplete_batches()
     except Exception:
         logger.exception("[startup FAILED] 后端启动期异常，详见堆栈；容器会退出并由 restart 策略决定是否重试")
         raise
