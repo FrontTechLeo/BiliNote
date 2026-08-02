@@ -1,4 +1,19 @@
+from __future__ import annotations
+
 import re
+
+
+_INTERNAL_LOCAL_SOURCE_RE = re.compile(
+    r"^\s*>\s*来源链接[：:]\s*/uploads/(?:batch_videos|batch_previews)/[^\r\n]*\r?\n(?:\r?\n)?",
+    re.IGNORECASE,
+)
+
+
+def remove_internal_local_source_link(markdown: str | None) -> str | None:
+    """Hide implementation-only local cache paths from user-facing Markdown."""
+    if markdown is None:
+        return None
+    return _INTERNAL_LOCAL_SOURCE_RE.sub("", markdown, count=1)
 
 
 def prepend_source_link(markdown: str | None, source_url: str) -> str | None:

@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
-  Button, Card, Checkbox, Descriptions, Drawer, Empty, Form, Input, Layout, Menu, Message, Modal,
+  Alert, Button, Card, Checkbox, Descriptions, Drawer, Empty, Form, Input, Layout, Menu, Message, Modal,
   Progress, Radio, Select, Space, Steps, Switch, Table, Tabs, Tag, Tooltip,
 } from '@arco-design/web-react'
 import {
-  IconApps, IconCloud, IconDownload, IconLink, IconPlus, IconRefresh, IconRobot, IconSettings, IconStorage,
+  IconApps, IconCloud, IconDownload, IconLink, IconPlus, IconRefresh, IconRobot, IconSettings, IconStorage, IconUpload,
 } from '@arco-design/web-react/icon'
 import { api, downloadBlob } from './api'
 import MarkdownPreview from './MarkdownPreview'
-import type { BatchItem, BatchTask, Model, Provider } from './types'
+import type { BatchItem, BatchTask, Model, Provider, SingleTaskHistory, SingleTaskStatus } from './types'
 
 const { Header, Sider, Content } = Layout
 const { Step } = Steps
@@ -27,12 +27,37 @@ const statusColor: Record<string, string> = {
   PENDING: 'gray', PARSING: 'arcoblue', DOWNLOADING: 'arcoblue', TRANSCRIBING: 'arcoblue',
   SUMMARIZING: 'arcoblue', FORMATTING: 'arcoblue', SAVING: 'arcoblue',
 }
+const filenameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' })
 
 function normaliseOptions(values: any) {
   const grid = typeof values.grid_size === 'string'
     ? values.grid_size.split(',').map((value: string) => Number(value.trim())).filter(Boolean)
     : values.grid_size
   return { ...values, grid_size: Array.isArray(grid) && grid.length === 2 ? grid : [2, 2] }
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const value = bytes / 1024 ** index
+  return `${value >= 100 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`
+}
+
+function sortFilesNaturally(files: File[]) {
+  return [...files].sort((left, right) => {
+    const leftPath = (left as File & { webkitRelativePath?: string }).webkitRelativePath || left.name
+    const rightPath = (right as File & { webkitRelativePath?: string }).webkitRelativePath || right.name
+    return filenameCollator.compare(leftPath, rightPath)
+  })
+}
+
+function userFacingMarkdown(markdown: string, platform: string) {
+  if (platform !== 'local') return markdown
+  return markdown.replace(
+    /^\s*>\s*来源链接[：:]\s*\/uploads\/(?:batch_videos|batch_previews)\/[^\r\n]*\r?\n(?:\r?\n)?/i,
+    '',
+  )
 }
 
 function Status({ value }: { value?: string }) {
@@ -98,16 +123,62 @@ function SingleTaskPage() {
   const [form] = Form.useForm()
   const { providers, models } = useProviders()
   const [submitting, setSubmitting] = useState(false)
-  const [task, setTask] = useState<any>()
+  const [task, setTask] = useState<SingleTaskStatus>()
+  const [history, setHistory] = useState<SingleTaskHistory[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [activeTab, setActiveTab] = useState('create')
+  const [preview, setPreview] = useState<{ taskId: string; title: string; markdown: string; sourceUrl?: string }>()
+  const [previewLoadingId, setPreviewLoadingId] = useState<string>()
+  const [regeneratingId, setRegeneratingId] = useState<string>()
+  const autoOpenedTaskRef = useRef<string | undefined>(undefined)
+  const historyRequestRef = useRef(0)
   const localFile = useRef<HTMLInputElement>(null)
-  const poll = useCallback(async (taskId: string) => {
-    try { setTask(await api.get<any>(`/task_status/${taskId}`)) } catch (error) { setTask({ status: 'FAILED', message: String(error) }) }
+  const loadHistory = useCallback(async (showLoading = true) => {
+    const requestId = ++historyRequestRef.current
+    if (showLoading) setHistoryLoading(true)
+    try {
+      const result = await api.get<{ items: SingleTaskHistory[] }>('/single/tasks?page=1&page_size=100')
+      if (requestId === historyRequestRef.current) setHistory(result.items)
+    } finally {
+      if (requestId === historyRequestRef.current) setHistoryLoading(false)
+    }
   }, [])
+  const poll = useCallback(async (taskId: string) => {
+    try {
+      const updated = await api.get<SingleTaskStatus>(`/task_status/${taskId}`)
+      setTask((current) => current?.task_id === taskId ? { ...current, ...updated } : updated)
+      if (['SUCCESS', 'FAILED'].includes(updated.status)) void loadHistory(false).catch(() => undefined)
+      if (updated.status === 'SUCCESS' && updated.result?.markdown && autoOpenedTaskRef.current !== taskId) {
+        autoOpenedTaskRef.current = taskId
+        setPreview({
+          taskId,
+          markdown: updated.result.markdown,
+          title: updated.result.audio_meta?.title || '单视频 AI 笔记',
+        })
+      }
+    } catch (error) {
+      setTask((current) => ({
+        task_id: taskId,
+        status: 'FAILED',
+        message: error instanceof Error ? error.message : String(error),
+        source_url: current?.source_url,
+        platform: current?.platform,
+      }))
+      void loadHistory(false).catch(() => undefined)
+    }
+  }, [loadHistory])
+  useEffect(() => { void loadHistory().catch((error: Error) => Message.error(error.message)) }, [loadHistory])
   useEffect(() => {
     if (!task?.task_id || ['SUCCESS', 'FAILED'].includes(task.status)) return
     const timer = window.setInterval(() => void poll(task.task_id), 2500)
     return () => window.clearInterval(timer)
   }, [task?.task_id, task?.status, poll])
+  const hasActiveHistory = history.some((item) => !['SUCCESS', 'FAILED'].includes(item.status))
+  useEffect(() => {
+    if (!hasActiveHistory) return
+    const timer = window.setInterval(() => void loadHistory(false).catch(() => undefined), 4000)
+    return () => window.clearInterval(timer)
+  }, [hasActiveHistory, loadHistory])
   const submit = async () => {
     try {
       const values = await form.validate()
@@ -121,36 +192,134 @@ function SingleTaskPage() {
         videoUrl = upload.url
       }
       const result = await api.post<{ task_id: string }>('/generate_note', { ...normaliseOptions(values), video_url: videoUrl, link: values.format?.includes('link'), screenshot: values.format?.includes('screenshot') })
-      setTask({ task_id: result.task_id, status: 'PENDING', message: '任务已提交' })
+      autoOpenedTaskRef.current = undefined
+      setTask({ task_id: result.task_id, status: 'PENDING', message: '任务已提交', source_url: videoUrl, platform: values.platform })
+      void loadHistory(false).catch(() => undefined)
       Message.success('单视频生成任务已提交')
     } catch (error) { Message.error(error instanceof Error ? error.message : '提交失败') } finally { setSubmitting(false) }
   }
+  const exportTask = async (taskId: string, title: string) => {
+    try {
+      const blob = await api.download(`/export_note/${taskId}`)
+      const extension = blob.type.includes('zip') ? 'zip' : 'md'
+      downloadBlob(blob, `${title.replace(/[\\/:*?"<>|]/g, '-').trim() || 'note'}.${extension}`)
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '导出失败')
+    }
+  }
+  const readHistory = async (record: SingleTaskHistory) => {
+    try {
+      setPreviewLoadingId(record.task_id)
+      const status = await api.get<SingleTaskStatus>(`/task_status/${record.task_id}`)
+      if (!status.result?.markdown) {
+        Message.warning('该任务暂时没有可阅读的笔记内容')
+        return
+      }
+      setPreview({
+        taskId: record.task_id,
+        markdown: status.result.markdown,
+        title: record.title || status.result.audio_meta?.title || '单视频 AI 笔记',
+        sourceUrl: record.platform === 'local' ? undefined : record.source_url,
+      })
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '读取笔记失败')
+    } finally {
+      setPreviewLoadingId(undefined)
+    }
+  }
+  const regenerate = async (record: SingleTaskHistory) => {
+    try {
+      setRegeneratingId(record.task_id)
+      const result = await api.post<{ task_id: string }>(`/single/tasks/${record.task_id}/regenerate`)
+      autoOpenedTaskRef.current = undefined
+      setTask({
+        task_id: result.task_id,
+        status: 'PENDING',
+        message: `基于“${record.title}”重新生成`,
+        source_url: record.source_url,
+        platform: record.platform,
+      })
+      setActiveTab('create')
+      void loadHistory(false).catch(() => undefined)
+      Message.success('重新生成任务已提交')
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '重新生成失败')
+    } finally {
+      setRegeneratingId(undefined)
+    }
+  }
+  const currentTitle = task?.result?.audio_meta?.title || '单视频 AI 笔记'
   return <div className="page">
-    <PageHeader title="单视频生成" description="支持哔哩哔哩、YouTube、抖音、快手与本地视频，使用与原应用一致的生成配置。" />
-    <Card><Form form={form} layout="vertical" initialValues={{ platform: 'bilibili', quality: 'medium', style: 'minimal', format: [], video_interval: 6, grid_size: '2,2' }} scrollToFirstError>
-      <div className="form-grid">
-        <Form.Item field="platform" label="视频来源"><Select options={[{ label: '哔哩哔哩', value: 'bilibili' }, { label: 'YouTube', value: 'youtube' }, { label: '抖音', value: 'douyin' }, { label: '快手', value: 'kuaishou' }, { label: '本地视频', value: 'local' }]} /></Form.Item>
-        <Form.Item shouldUpdate noStyle>{() => form.getFieldValue('platform') === 'local' ? <Form.Item label="本地视频" required><input ref={localFile} type="file" accept="video/*" /></Form.Item> : <Form.Item field="video_url" label="视频链接" rules={[{ required: true, message: '请输入视频链接' }]}><Input placeholder="粘贴视频链接" /></Form.Item>}</Form.Item>
-      </div>
-      <ModelFields form={form} providers={providers} models={models} />
-      <NoteOptions form={form} />
-      <Button type="primary" icon={<IconRobot />} loading={submitting} onClick={submit}>开始生成</Button>
-    </Form></Card>
-    {task && <Card className="single-task-result" style={{ marginTop: 16 }} title="当前任务">
-      <Space direction="vertical" size={16} style={{ width: '100%' }}>
-        <Space><Status value={task.status} /><span>{task.message || (task.status === 'SUCCESS' ? '笔记已生成，可直接阅读' : '正在处理')}</span></Space>
-        {task.result?.markdown && (
-          <MarkdownPreview
-            content={task.result.markdown}
-            title={task.result?.audio_meta?.title || '单视频 AI 笔记'}
+    <PageHeader title="单视频任务" description="创建、阅读和管理单个视频的 AI 笔记，历史结果可随时查看或重新生成。" actions={<Button icon={<IconRefresh />} onClick={() => void loadHistory()}>刷新历史</Button>} />
+    <Tabs activeTab={activeTab} onChange={setActiveTab} type="rounded" className="single-task-tabs">
+      <Tabs.TabPane key="create" title="新建任务">
+        <Card><Form form={form} layout="vertical" initialValues={{ platform: 'bilibili', quality: 'medium', style: 'minimal', format: [], video_interval: 6, grid_size: '2,2' }} scrollToFirstError>
+          <div className="form-grid">
+            <Form.Item field="platform" label="视频来源"><Select options={[{ label: '哔哩哔哩', value: 'bilibili' }, { label: 'YouTube', value: 'youtube' }, { label: '抖音', value: 'douyin' }, { label: '快手', value: 'kuaishou' }, { label: '本地视频', value: 'local' }]} /></Form.Item>
+            <Form.Item shouldUpdate noStyle>{() => form.getFieldValue('platform') === 'local' ? <Form.Item label="本地视频" required><input ref={localFile} type="file" accept="video/*" /></Form.Item> : <Form.Item field="video_url" label="视频链接" rules={[{ required: true, message: '请输入视频链接' }]}><Input placeholder="粘贴视频链接" /></Form.Item>}</Form.Item>
+          </div>
+          <ModelFields form={form} providers={providers} models={models} />
+          <NoteOptions form={form} />
+          <Button type="primary" icon={<IconRobot />} loading={submitting} onClick={submit}>开始生成</Button>
+        </Form></Card>
+        {task && <Card className="single-task-result" title="当前任务">
+          <div className="single-task-current">
+            <div className="single-task-current-status">
+              <Status value={task.status} />
+              <div><strong>{currentTitle}</strong><span>{task.message || (task.status === 'SUCCESS' ? '笔记已生成，可以进入专业阅读模式' : '任务正在处理中，完成后将自动打开阅读视图')}</span></div>
+            </div>
+            <Space wrap>
+              <Button disabled={!task.result?.markdown} onClick={() => task.result?.markdown && setPreview({ taskId: task.task_id, markdown: task.result.markdown, title: currentTitle, sourceUrl: task.platform === 'local' ? undefined : task.source_url })}>阅读笔记</Button>
+              <Button icon={<IconDownload />} disabled={!task.result?.markdown} onClick={() => void exportTask(task.task_id, currentTitle)}>导出{task.result?.markdown?.includes('/static/screenshots/') ? ' ZIP' : ''}</Button>
+            </Space>
+          </div>
+        </Card>}
+      </Tabs.TabPane>
+      <Tabs.TabPane key="history" title={`历史记录${history.length ? ` (${history.length})` : ''}`}>
+        <Card>
+          <Table
+            rowKey="task_id"
+            loading={historyLoading}
+            data={history}
+            pagination={false}
+            scroll={{ x: 1080 }}
+            noDataElement={<Empty description="暂无单视频生成记录" />}
+            columns={[
+              { title: '笔记标题', dataIndex: 'title', width: 300, ellipsis: true },
+              { title: '来源', dataIndex: 'platform', width: 100 },
+              { title: '状态', dataIndex: 'status', width: 120, render: (value: string) => <Status value={value} /> },
+              { title: '原视频', dataIndex: 'source_url', width: 230, ellipsis: true, render: (value?: string) => value || '历史记录未保存' },
+              { title: '导出', width: 90, render: (_: unknown, record: SingleTaskHistory) => record.has_result ? <Tag color={record.has_images ? 'arcoblue' : 'gray'}>{record.export_format.toUpperCase()}</Tag> : '-' },
+              { title: '创建时间', dataIndex: 'created_at', width: 180, render: (value?: string) => value ? new Date(value).toLocaleString() : '-' },
+              { title: '操作', fixed: 'right', width: 250, render: (_: unknown, record: SingleTaskHistory) => <Space className="single-task-history-actions" size={4}>
+                <Button type="text" size="small" loading={previewLoadingId === record.task_id} disabled={!record.has_result} onClick={() => void readHistory(record)}>阅读</Button>
+                <Button type="text" size="small" disabled={!record.has_result} onClick={() => void exportTask(record.task_id, record.title)}>导出</Button>
+                <Tooltip content={record.can_regenerate ? '使用原视频和原配置创建一个新任务' : '旧任务缺少原始配置，或本地视频已不存在'}>
+                  <span><Button type="text" status="warning" size="small" loading={regeneratingId === record.task_id} disabled={!record.can_regenerate} onClick={() => void regenerate(record)}>重新生成</Button></span>
+                </Tooltip>
+              </Space> },
+            ]}
           />
-        )}
-      </Space>
-    </Card>}
+        </Card>
+      </Tabs.TabPane>
+    </Tabs>
+    <Drawer className="markdown-reader-drawer" visible={Boolean(preview)} width="min(1380px, 97vw)" title="单视频笔记阅读" onCancel={() => setPreview(undefined)} footer={null} unmountOnExit>
+      {preview && <MarkdownPreview content={preview.markdown} title={preview.title} sourceUrl={preview.sourceUrl} onDownload={() => void exportTask(preview.taskId, preview.title)} />}
+    </Drawer>
   </div>
 }
 
 type PreviewItem = { title: string; source_url: string; platform: string; position?: number }
+type AppendPreview = {
+  title: string
+  items: PreviewItem[]
+  discovered_count: number
+  skipped_count: number
+}
+type LocalAnalysisProgress = {
+  percent: number
+  label: string
+}
 
 function CreateBatchModal({ visible, onClose, onCreated }: { visible: boolean; onClose: () => void; onCreated: () => void }) {
   const [sourceForm] = Form.useForm()
@@ -190,7 +359,7 @@ function CreateBatchModal({ visible, onClose, onCreated }: { visible: boolean; o
     <Steps current={step} style={{ marginBottom: 24 }}><Step title="分析视频列表" /><Step title="配置生成任务" /></Steps>
     {step === 0 ? <Form form={sourceForm} layout="vertical" initialValues={{ source_type: 'bilibili' }}>
       <Form.Item field="source_type" label="批量任务类型"><Radio.Group><Radio value="bilibili">哔哩哔哩合集</Radio><Radio value="local">本地文件夹</Radio></Radio.Group></Form.Item>
-      {sourceType === 'bilibili' ? <Form.Item field="source_url" label="合集链接" rules={[{ required: true, message: '请输入哔哩哔哩合集或视频链接' }]}><Input placeholder="例如 https://www.bilibili.com/video/BV1rv7A6oEeP/" /></Form.Item> : <Form.Item label="本地视频文件夹" required extra="选择文件夹后会上传视频并展示可选列表"><input type="file" multiple accept="video/*" {...({ webkitdirectory: '', directory: '' } as any)} onChange={(event) => setFiles(Array.from(event.target.files || []))} /></Form.Item>}
+      {sourceType === 'bilibili' ? <Form.Item field="source_url" label="合集链接" rules={[{ required: true, message: '请输入哔哩哔哩合集或视频链接' }]}><Input placeholder="例如 https://www.bilibili.com/video/BV1rv7A6oEeP/" /></Form.Item> : <Form.Item label="本地视频文件夹" required extra="选择文件夹后会上传视频并按文件名自然排序"><input type="file" multiple accept="video/*" {...({ webkitdirectory: '', directory: '' } as any)} onChange={(event) => setFiles(sortFilesNaturally(Array.from(event.target.files || [])))} /></Form.Item>}
       <Space><Button type="primary" loading={loading} onClick={analyse}>分析视频</Button><Button onClick={reset}>取消</Button></Space>
     </Form> : <>
       <div className="source-list"><Table rowKey="source_url" size="small" data={preview?.items || []} pagination={false} rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys as string[]), checkAll: true }} columns={[{ title: '序号', dataIndex: 'position', width: 72, render: (_: unknown, record: PreviewItem, index: number) => index + 1 }, { title: '视频标题', dataIndex: 'title', ellipsis: true }, { title: '来源', dataIndex: 'platform', width: 110 }]} /></div>
@@ -200,16 +369,286 @@ function CreateBatchModal({ visible, onClose, onCreated }: { visible: boolean; o
   </Modal>
 }
 
-function BatchDetail({ task, onClose }: { task?: BatchTask; onClose: () => void }) {
+function AppendBatchModal({
+  task,
+  visible,
+  onClose,
+  onAppended,
+}: {
+  task?: BatchTask
+  visible: boolean
+  onClose: () => void
+  onAppended: (task: BatchTask) => void
+}) {
+  const [sourceForm] = Form.useForm()
+  const [step, setStep] = useState(0)
+  const [preview, setPreview] = useState<AppendPreview>()
+  const [selected, setSelected] = useState<string[]>([])
+  const [files, setFiles] = useState<File[]>([])
+  const [appendSourceType, setAppendSourceType] = useState<'bilibili' | 'local'>('bilibili')
+  const [analysisProgress, setAnalysisProgress] = useState<LocalAnalysisProgress>()
+  const [loading, setLoading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const folderInputRef = useRef<HTMLInputElement>(null)
+  const uploadAbortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    if (visible && task) {
+      const sourceType = task.source_type === 'local' ? 'local' : 'bilibili'
+      setAppendSourceType(sourceType)
+      sourceForm.setFieldsValue({ source_url: task.source_type === 'bilibili' ? task.source_value || '' : '' })
+    }
+  }, [sourceForm, task, visible])
+
+  const reset = () => {
+    uploadAbortRef.current?.abort()
+    uploadAbortRef.current = null
+    setStep(0)
+    setPreview(undefined)
+    setSelected([])
+    setFiles([])
+    setAppendSourceType('bilibili')
+    setAnalysisProgress(undefined)
+    sourceForm.resetFields()
+    if (fileInputRef.current) fileInputRef.current.value = ''
+    if (folderInputRef.current) folderInputRef.current.value = ''
+    onClose()
+  }
+  const mergeFiles = (incoming: File[]) => {
+    setFiles((current) => {
+      const unique = new Map<string, File>()
+      for (const file of [...current, ...incoming]) {
+        const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath
+        unique.set(`${relativePath || file.name}:${file.size}:${file.lastModified}`, file)
+      }
+      return sortFilesNaturally(Array.from(unique.values()))
+    })
+  }
+  const analyse = async () => {
+    if (!task) return
+    try {
+      setLoading(true)
+      let result: AppendPreview
+      if (appendSourceType === 'bilibili') {
+        const values = await sourceForm.validate()
+        result = await api.post(`/batch/tasks/${task.id}/preview/bilibili`, { source_url: values.source_url })
+      } else {
+        if (!files.length) throw new Error('请选择至少一个本地视频或视频文件夹')
+        const totalBytes = files.reduce((total, file) => total + file.size, 0)
+        const data = new FormData()
+        files.forEach((file) => data.append('files', file))
+        const controller = new AbortController()
+        uploadAbortRef.current = controller
+        setAnalysisProgress({
+          percent: 0,
+          label: `准备上传 ${files.length} 个视频（${formatBytes(totalBytes)}）`,
+        })
+        result = await api.uploadWithProgress(
+          `/batch/tasks/${task.id}/preview/local`,
+          data,
+          ({ percent }) => {
+            setAnalysisProgress({
+              percent,
+              label: percent < 100
+                ? `正在上传 ${files.length} 个视频（${formatBytes(totalBytes)}）`
+                : '上传完成，后端正在保存文件并检查重复内容…',
+            })
+          },
+          controller.signal,
+        )
+        uploadAbortRef.current = null
+      }
+      setPreview(result)
+      setSelected(result.items.map((item) => item.source_url))
+      setStep(1)
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
+        Message.error(error instanceof Error ? error.message : '分析新增视频失败')
+      }
+    } finally {
+      uploadAbortRef.current = null
+      setAnalysisProgress(undefined)
+      setLoading(false)
+    }
+  }
+  const append = async () => {
+    if (!task || !preview) return
+    try {
+      if (!selected.length) throw new Error('至少选择一个新增视频')
+      setLoading(true)
+      const result = await api.post<{
+        task: BatchTask
+        added_count: number
+        skipped_count: number
+      }>(`/batch/tasks/${task.id}/items`, {
+        items: preview.items.filter((item) => selected.includes(item.source_url)),
+      })
+      Message.success(`已追加 ${result.added_count} 个视频，任务重新进入执行队列`)
+      onAppended(result.task)
+      reset()
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '追加视频失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return <Modal
+    visible={visible}
+    title={task ? `追加视频 · ${task.title}` : '追加视频'}
+    style={{ width: 820, maxWidth: 'calc(100vw - 32px)' }}
+    footer={null}
+    maskClosable={false}
+    onCancel={reset}
+    unmountOnExit
+  >
+    <Alert
+      type="info"
+      content={`新增视频将沿用原批次的模型、笔记格式和视频理解配置；已加入过的${appendSourceType === 'local' ? '相同内容文件' : '视频及分P'}会自动过滤。`}
+      style={{ marginBottom: 20 }}
+    />
+    <Steps current={step} style={{ marginBottom: 24 }}>
+      <Step title={appendSourceType === 'local' ? '选择本地视频' : '解析远程合集'} />
+      <Step title="确认新增视频" />
+    </Steps>
+    {step === 0 ? <>
+      <div className="append-source-switch">
+        <span>追加来源</span>
+        <Radio.Group
+          type="button"
+          value={appendSourceType}
+          onChange={(value) => {
+            setAppendSourceType(value as 'bilibili' | 'local')
+            setPreview(undefined)
+            setSelected([])
+          }}
+        >
+          <Radio value="bilibili">B站链接</Radio>
+          <Radio value="local">本地视频</Radio>
+        </Radio.Group>
+      </div>
+      {appendSourceType === 'bilibili' ? (
+        <Form form={sourceForm} layout="vertical">
+          <Form.Item field="source_url" label="哔哩哔哩合集或视频链接" rules={[{ required: true, message: '请输入链接' }]}>
+            <Input placeholder="默认使用原合集链接，也可以粘贴其它 B 站视频或合集链接" />
+          </Form.Item>
+        </Form>
+      ) : (
+        <div className="append-file-picker">
+          <Space wrap>
+            <Button icon={<IconUpload />} onClick={() => fileInputRef.current?.click()}>选择视频文件</Button>
+            <Button icon={<IconApps />} onClick={() => folderInputRef.current?.click()}>选择视频文件夹</Button>
+            <span>{files.length ? `已选择 ${files.length} 个文件` : '尚未选择文件'}</span>
+          </Space>
+          <input ref={fileInputRef} hidden type="file" multiple accept="video/*" onChange={(event) => mergeFiles(Array.from(event.target.files || []))} />
+          <input ref={folderInputRef} hidden type="file" multiple accept="video/*" {...({ webkitdirectory: '', directory: '' } as any)} onChange={(event) => mergeFiles(Array.from(event.target.files || []))} />
+          <div className="append-upload-hint">浏览器需要先把本地视频上传到 BiliNote 服务后才能分析；文件较大时请查看下方真实进度。</div>
+          {files.length > 0 && <div className="append-file-summary">{files.slice(0, 4).map((file) => file.name).join('、')}{files.length > 4 ? ` 等 ${files.length} 个文件` : ''}</div>}
+          {analysisProgress && <div className="append-upload-progress">
+            <div><span>{analysisProgress.label}</span><strong>{analysisProgress.percent}%</strong></div>
+            <Progress percent={analysisProgress.percent} showText={false} size="small" />
+          </div>}
+        </div>
+      )}
+      <Space style={{ marginTop: 20 }}>
+        <Button type="primary" loading={loading} onClick={() => void analyse()}>分析新增视频</Button>
+        <Button onClick={reset}>{loading && appendSourceType === 'local' ? '取消上传' : '取消'}</Button>
+      </Space>
+    </> : <>
+      <Alert
+        type={preview?.items.length ? 'success' : 'warning'}
+        content={`共发现 ${preview?.discovered_count || 0} 个视频，已过滤 ${preview?.skipped_count || 0} 个已有视频，可追加 ${preview?.items.length || 0} 个。`}
+        style={{ marginBottom: 16 }}
+      />
+      <div className="source-list">
+        <Table
+          rowKey="source_url"
+          size="small"
+          data={preview?.items || []}
+          pagination={false}
+          noDataElement={<Empty description="没有发现可追加的新视频" />}
+          rowSelection={preview?.items.length ? {
+            selectedRowKeys: selected,
+            onChange: (keys) => setSelected(keys as string[]),
+            checkAll: true,
+          } : undefined}
+          columns={[
+            { title: '序号', width: 72, render: (_: unknown, _record: PreviewItem, index: number) => index + 1 },
+            { title: '视频标题', dataIndex: 'title', ellipsis: true },
+            { title: '来源', dataIndex: 'platform', width: 110 },
+          ]}
+        />
+      </div>
+      <Space style={{ marginTop: 20 }}>
+        <Button onClick={() => setStep(0)}>重新选择</Button>
+        <Button type="primary" disabled={!selected.length} loading={loading} onClick={() => void append()}>追加并开始处理</Button>
+      </Space>
+    </>}
+  </Modal>
+}
+
+function BatchDetail({
+  task,
+  onClose,
+  onAppend,
+  onTaskChange,
+}: {
+  task?: BatchTask
+  onClose: () => void
+  onAppend: (task: BatchTask) => void
+  onTaskChange: (task: BatchTask) => void
+}) {
   const [items, setItems] = useState<BatchItem[]>([])
   const [selected, setSelected] = useState<string[]>([])
   const [events, setEvents] = useState<any[]>([])
-  const [preview, setPreview] = useState<{ markdown: string; title: string; sourceUrl: string; itemId: string }>()
+  const [preview, setPreview] = useState<{ markdown: string; title: string; sourceUrl?: string; itemId: string }>()
   const [previewLoadingId, setPreviewLoadingId] = useState<string>()
-  const load = useCallback(async () => { if (task) setItems(await api.get<BatchItem[]>(`/batch/tasks/${task.id}/items`)) }, [task])
+  const [retryingId, setRetryingId] = useState<string>()
+  const loadRequestRef = useRef(0)
+  const taskId = task?.id
+  useEffect(() => {
+    loadRequestRef.current += 1
+    setItems([])
+    setSelected([])
+    setEvents([])
+  }, [taskId])
+  const load = useCallback(async () => {
+    if (!taskId) return
+    const requestId = ++loadRequestRef.current
+    const [updatedTask, updatedItems] = await Promise.all([
+      api.get<BatchTask>(`/batch/tasks/${taskId}`),
+      api.get<BatchItem[]>(`/batch/tasks/${taskId}/items`),
+    ])
+    if (requestId !== loadRequestRef.current) return
+    setItems(updatedItems)
+    onTaskChange(updatedTask)
+  }, [onTaskChange, taskId])
   useEffect(() => { void load().catch((error: Error) => Message.error(error.message)) }, [load])
-  useEffect(() => { if (!task || ['SUCCESS', 'FAILED', 'PARTIAL_FAILED'].includes(task.status)) return; const timer = window.setInterval(() => void load(), 2500); return () => window.clearInterval(timer) }, [task, load])
-  const retry = async (item: BatchItem) => { try { await api.post(`/batch/tasks/${task?.id}/items/${item.id}/retry`); Message.success('已加入重试队列'); void load() } catch (error) { Message.error(error instanceof Error ? error.message : '重试失败') } }
+  const hasActiveItems = items.some((item) => !['SUCCESS', 'FAILED'].includes(item.status))
+  const batchIsActive = Boolean(task && ['PENDING', 'RUNNING'].includes(task.status))
+  useEffect(() => {
+    if (!taskId || (!batchIsActive && !hasActiveItems)) return
+    const timer = window.setInterval(() => void load().catch(() => undefined), 2500)
+    return () => window.clearInterval(timer)
+  }, [batchIsActive, hasActiveItems, load, taskId])
+  const retry = async (item: BatchItem) => {
+    if (!taskId) return
+    try {
+      setRetryingId(item.id)
+      const updatedItem = await api.post<BatchItem>(`/batch/tasks/${taskId}/items/${item.id}/retry`)
+      setItems((current) => current.map((row) => row.id === updatedItem.id ? updatedItem : row))
+      Message.success('已加入重试队列')
+      try {
+        await load()
+      } catch (error) {
+        Message.warning(error instanceof Error ? `任务已重试，但状态刷新失败：${error.message}` : '任务已重试，请稍后刷新状态')
+      }
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '重试失败')
+    } finally {
+      setRetryingId(undefined)
+    }
+  }
   const showEvents = async (item: BatchItem) => { setEvents(await api.get<any[]>(`/batch/tasks/${task?.id}/items/${item.id}/events`)) }
   const showPreview = async (item: BatchItem) => {
     try {
@@ -221,9 +660,9 @@ function BatchDetail({ task, onClose }: { task?: BatchTask; onClose: () => void 
         return
       }
       setPreview({
-        markdown,
-        title: result.result?.audio_meta?.title || item.title,
-        sourceUrl: item.source_url,
+        markdown: userFacingMarkdown(markdown, item.platform),
+        title: item.title || result.result?.audio_meta?.title || '本地视频笔记',
+        sourceUrl: item.platform === 'local' ? undefined : item.source_url,
         itemId: item.id,
       })
     } catch (error) {
@@ -234,12 +673,12 @@ function BatchDetail({ task, onClose }: { task?: BatchTask; onClose: () => void 
   }
   const exportItems = async (ids?: string[]) => { try { const blob = await api.download(`/batch/tasks/${task?.id}/export`, ids ? { item_ids: ids } : undefined); downloadBlob(blob, `${task?.title || 'notes'}.zip`) } catch (error) { Message.error(error instanceof Error ? error.message : '导出失败') } }
   return <><Drawer visible={Boolean(task)} width={980} title={task ? `批量任务：${task.title}` : ''} onCancel={onClose} footer={null}>
-    {task && <Tabs><Tabs.TabPane key="items" title="子任务"><Descriptions column={2} data={[{ label: '整体状态', value: <Status value={task.status} /> }, { label: '总体进度', value: <Progress percent={task.progress} size="small" /> }, { label: '成功 / 失败', value: `${task.completed_count} / ${task.failed_count}` }, { label: '视频总数', value: task.total_count }]} /><div className="toolbar" style={{ margin: '16px 0' }}><Button icon={<IconDownload />} onClick={() => void exportItems()}>导出全部</Button><Button disabled={!selected.length} icon={<IconDownload />} onClick={() => void exportItems(selected)}>导出所选</Button></div><Table rowKey="id" data={items} scroll={{ x: 980 }} rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys as string[]) }} columns={[{ title: '序号', dataIndex: 'position', width: 64 }, { title: '视频', dataIndex: 'title', width: 240, ellipsis: true }, { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Status value={value} /> }, { title: '日志', dataIndex: 'message', ellipsis: true, render: (value: string, record: BatchItem) => <Tooltip content={value}><Button type="text" size="small" onClick={() => void showEvents(record)}>{value || '查看日志'}</Button></Tooltip> }, { title: '次数', dataIndex: 'attempts', width: 72 }, { title: '操作', width: 190, fixed: 'right', render: (_: unknown, record: BatchItem) => <Space><Button type="text" size="small" loading={previewLoadingId === record.id} disabled={record.status !== 'SUCCESS'} onClick={() => void showPreview(record)}>阅读</Button><Button type="text" size="small" disabled={record.status !== 'SUCCESS'} onClick={() => void exportItems([record.id])}>导出</Button>{record.status === 'FAILED' && <Button type="text" status="warning" size="small" onClick={() => void retry(record)}>重试</Button>}</Space> }]} /></Tabs.TabPane><Tabs.TabPane key="logs" title="运行日志"><div className="terminal">{events.length ? events.map((event) => `[${event.created_at || '-'}] ${event.status} ${event.message || ''}`).join('\n') : '点击子任务的日志内容查看运行事件。'}</div></Tabs.TabPane></Tabs>
+    {task && <Tabs><Tabs.TabPane key="items" title="子任务"><Descriptions column={2} data={[{ label: '整体状态', value: <Status value={task.status} /> }, { label: '总体进度', value: <Progress percent={task.progress} size="small" /> }, { label: '成功 / 失败', value: `${task.completed_count} / ${task.failed_count}` }, { label: '视频总数', value: task.total_count }]} /><div className="toolbar" style={{ margin: '16px 0' }}>{['SUCCESS', 'FAILED', 'PARTIAL_FAILED'].includes(task.status) && <Button type="primary" icon={<IconPlus />} onClick={() => onAppend(task)}>追加视频</Button>}<Button icon={<IconDownload />} onClick={() => void exportItems()}>导出全部</Button><Button disabled={!selected.length} icon={<IconDownload />} onClick={() => void exportItems(selected)}>导出所选</Button></div><Table className="batch-detail-table" rowKey="id" data={items} scroll={{ x: 1080 }} rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys as string[]) }} columns={[{ title: '序号', dataIndex: 'position', width: 64 }, { title: '视频', dataIndex: 'title', width: 240, ellipsis: true }, { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Status value={value} /> }, { title: '日志', dataIndex: 'message', ellipsis: true, render: (value: string, record: BatchItem) => <Tooltip content={value}><Button type="text" size="small" onClick={() => void showEvents(record)}>{value || '查看日志'}</Button></Tooltip> }, { title: '次数', dataIndex: 'attempts', width: 72 }, { title: '操作', width: 224, fixed: 'right', bodyCellStyle: { whiteSpace: 'nowrap' }, render: (_: unknown, record: BatchItem) => <Space className="batch-row-actions" size={4}><Button type="text" size="small" loading={previewLoadingId === record.id} disabled={record.status !== 'SUCCESS'} onClick={() => void showPreview(record)}>阅读</Button><Button type="text" size="small" disabled={record.status !== 'SUCCESS'} onClick={() => void exportItems([record.id])}>导出</Button>{record.status === 'FAILED' && <Button type="text" status="warning" size="small" loading={retryingId === record.id} onClick={() => void retry(record)}>重试</Button>}</Space> }]} /></Tabs.TabPane><Tabs.TabPane key="logs" title="运行日志"><div className="terminal">{events.length ? events.map((event) => `[${event.created_at || '-'}] ${event.status} ${event.message || ''}`).join('\n') : '点击子任务的日志内容查看运行事件。'}</div></Tabs.TabPane></Tabs>
     }</Drawer>
     <Drawer
       className="markdown-reader-drawer"
       visible={Boolean(preview)}
-      width="min(1240px, 96vw)"
+      width="min(1380px, 97vw)"
       title="笔记阅读"
       onCancel={() => setPreview(undefined)}
       footer={null}
@@ -262,7 +701,26 @@ function BatchTaskPage() {
   const [loading, setLoading] = useState(true)
   const [createVisible, setCreateVisible] = useState(false)
   const [active, setActive] = useState<BatchTask>()
-  const load = useCallback(async () => { setLoading(true); try { const result = await api.get<{ items: BatchTask[] }>('/batch/tasks'); setTasks(result.items) } catch (error) { Message.error(error instanceof Error ? error.message : '加载失败') } finally { setLoading(false) } }, [])
+  const [appendTarget, setAppendTarget] = useState<BatchTask>()
+  const loadRequestRef = useRef(0)
+  const load = useCallback(async () => {
+    const requestId = ++loadRequestRef.current
+    setLoading(true)
+    try {
+      const result = await api.get<{ items: BatchTask[] }>('/batch/tasks')
+      if (requestId !== loadRequestRef.current) return
+      setTasks(result.items)
+      setActive((current) => current ? result.items.find((item) => item.id === current.id) || current : undefined)
+    } catch (error) {
+      if (requestId === loadRequestRef.current) Message.error(error instanceof Error ? error.message : '加载失败')
+    } finally {
+      if (requestId === loadRequestRef.current) setLoading(false)
+    }
+  }, [])
+  const handleTaskChange = useCallback((updated: BatchTask) => {
+    setTasks((current) => current.map((item) => item.id === updated.id ? updated : item))
+    setActive((current) => current?.id === updated.id ? updated : current)
+  }, [])
   useEffect(() => { void load() }, [load])
   const hasActiveTasks = tasks.some((item) => ['PENDING', 'RUNNING'].includes(item.status))
   useEffect(() => {
@@ -271,7 +729,7 @@ function BatchTaskPage() {
     return () => window.clearInterval(timer)
   }, [hasActiveTasks, load])
   const stats = useMemo(() => ({ running: tasks.filter((item) => item.status === 'RUNNING').length, complete: tasks.filter((item) => item.status === 'SUCCESS').length, failed: tasks.filter((item) => ['FAILED', 'PARTIAL_FAILED'].includes(item.status)).length }), [tasks])
-  return <div className="page"><PageHeader title="批量合集任务" description="解析哔哩哔哩公开视频合集或上传本地文件夹，持续生成可导出的课程笔记。" actions={<><Button icon={<IconRefresh />} onClick={() => void load()}>刷新</Button><Button type="primary" icon={<IconPlus />} onClick={() => setCreateVisible(true)}>新建批量任务</Button></>} /><div className="stats"><div className="stat"><div className="stat-value">{tasks.length}</div><div className="stat-label">批量任务</div></div><div className="stat"><div className="stat-value">{stats.running}</div><div className="stat-label">正在运行</div></div><div className="stat"><div className="stat-value">{stats.complete}</div><div className="stat-label">已全部完成</div></div><div className="stat"><div className="stat-value">{stats.failed}</div><div className="stat-label">需要处理</div></div></div><Card><Table rowKey="id" loading={loading} data={tasks} scroll={{ x: 1050 }} onRow={(record) => ({ onClick: () => setActive(record) })} columns={[{ title: '任务名称', dataIndex: 'title', width: 260, ellipsis: true }, { title: '来源', dataIndex: 'source_type', width: 110 }, { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Status value={value} /> }, { title: '进度', width: 220, render: (_: unknown, record: BatchTask) => <Progress percent={record.progress} size="small" /> }, { title: '完成 / 失败 / 总计', width: 160, render: (_: unknown, record: BatchTask) => `${record.completed_count} / ${record.failed_count} / ${record.total_count}` }, { title: '创建时间', dataIndex: 'created_at', width: 180, render: (value: string) => value ? new Date(value).toLocaleString() : '-' }, { title: '操作', width: 90, fixed: 'right', render: (_: unknown, record: BatchTask) => <Button type="text" size="small" onClick={(event) => { event.stopPropagation(); setActive(record) }}>查看</Button> }]} /></Card><CreateBatchModal visible={createVisible} onClose={() => setCreateVisible(false)} onCreated={load} /><BatchDetail task={active} onClose={() => setActive(undefined)} /></div>
+  return <div className="page"><PageHeader title="批量合集任务" description="解析哔哩哔哩公开视频合集或上传本地文件夹，持续生成可导出的课程笔记。" actions={<><Button icon={<IconRefresh />} onClick={() => void load()}>刷新</Button><Button type="primary" icon={<IconPlus />} onClick={() => setCreateVisible(true)}>新建批量任务</Button></>} /><div className="stats"><div className="stat"><div className="stat-value">{tasks.length}</div><div className="stat-label">批量任务</div></div><div className="stat"><div className="stat-value">{stats.running}</div><div className="stat-label">正在运行</div></div><div className="stat"><div className="stat-value">{stats.complete}</div><div className="stat-label">已全部完成</div></div><div className="stat"><div className="stat-value">{stats.failed}</div><div className="stat-label">需要处理</div></div></div><Card><Table rowKey="id" loading={loading} data={tasks} scroll={{ x: 1120 }} onRow={(record) => ({ onClick: () => setActive(record) })} columns={[{ title: '任务名称', dataIndex: 'title', width: 260, ellipsis: true }, { title: '来源', dataIndex: 'source_type', width: 110 }, { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Status value={value} /> }, { title: '进度', width: 220, render: (_: unknown, record: BatchTask) => <Progress percent={record.progress} size="small" /> }, { title: '完成 / 失败 / 总计', width: 160, render: (_: unknown, record: BatchTask) => `${record.completed_count} / ${record.failed_count} / ${record.total_count}` }, { title: '创建时间', dataIndex: 'created_at', width: 180, render: (value: string) => value ? new Date(value).toLocaleString() : '-' }, { title: '操作', width: 150, fixed: 'right', render: (_: unknown, record: BatchTask) => <Space><Button type="text" size="small" onClick={(event) => { event.stopPropagation(); setActive(record) }}>查看</Button>{['SUCCESS', 'FAILED', 'PARTIAL_FAILED'].includes(record.status) && <Button type="text" size="small" icon={<IconPlus />} onClick={(event) => { event.stopPropagation(); setAppendTarget(record) }}>追加</Button>}</Space> }]} /></Card><CreateBatchModal visible={createVisible} onClose={() => setCreateVisible(false)} onCreated={load} /><AppendBatchModal task={appendTarget} visible={Boolean(appendTarget)} onClose={() => setAppendTarget(undefined)} onAppended={(updated) => { handleTaskChange(updated); void load() }} /><BatchDetail task={active} onClose={() => setActive(undefined)} onAppend={setAppendTarget} onTaskChange={handleTaskChange} /></div>
 }
 
 function ModelSettings() {

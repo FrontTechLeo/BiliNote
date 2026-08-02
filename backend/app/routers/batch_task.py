@@ -45,6 +45,10 @@ class BatchExportRequest(BaseModel):
     item_ids: Optional[list[str]] = None
 
 
+class BatchAppendRequest(BaseModel):
+    items: list[BatchItemInput]
+
+
 @router.post("/batch/preview/bilibili")
 def preview_bilibili(data: BatchPreviewRequest):
     try:
@@ -68,6 +72,39 @@ def create_batch_task(data: BatchCreateRequest):
             data.title, data.source_type, data.source_value, data.config.model_dump(),
             [item.model_dump() for item in data.items],
         ))
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
+@router.post("/batch/tasks/{batch_id}/preview/bilibili")
+def preview_append_bilibili(batch_id: str, data: BatchPreviewRequest):
+    try:
+        return R.success(batch_task_service.preview_append_bilibili(batch_id, data.source_url))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
+@router.post("/batch/tasks/{batch_id}/preview/local")
+def preview_append_local(batch_id: str, files: list[UploadFile] = File(...)):
+    try:
+        return R.success(batch_task_service.preview_append_local(batch_id, files))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
+@router.post("/batch/tasks/{batch_id}/items")
+def append_batch_items(batch_id: str, data: BatchAppendRequest):
+    try:
+        return R.success(batch_task_service.append_items(
+            batch_id,
+            [item.model_dump() for item in data.items],
+        ))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
     except ValueError as exc:
         return R.error(msg=str(exc), code=400)
 

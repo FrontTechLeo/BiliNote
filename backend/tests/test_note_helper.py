@@ -30,6 +30,23 @@ class TestNoteHelper(unittest.TestCase):
 
         self.assertEqual(result, markdown)
 
+    def test_remove_internal_local_source_link_from_legacy_note(self):
+        markdown = (
+            "> 来源链接：/uploads/batch_videos/abc123.mp4\n\n"
+            "## 课程概述\n\n内容"
+        )
+
+        result = note_helper.remove_internal_local_source_link(markdown)
+
+        self.assertEqual(result, "## 课程概述\n\n内容")
+
+    def test_remove_internal_local_source_link_keeps_public_url(self):
+        markdown = "> 来源链接：https://example.com/video.mp4\n\n## 标题"
+
+        result = note_helper.remove_internal_local_source_link(markdown)
+
+        self.assertEqual(result, markdown)
+
 
 if __name__ == "__main__":
     unittest.main()

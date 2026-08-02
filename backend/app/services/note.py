@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
 import re
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any
@@ -37,6 +40,7 @@ from app.utils.screenshot_marker import extract_screenshot_timestamps
 from app.utils.status_code import StatusCode
 from app.utils.video_helper import generate_screenshot
 from app.utils.video_reader import VideoReader
+from app.utils.path_helper import get_app_dir
 
 # ------------------ 环境变量与全局配置 ------------------
 
@@ -97,6 +101,8 @@ class NoteGenerator:
         video_understanding: bool = False,
         video_interval: int = 0,
         grid_size: Optional[List[int]] = None,
+        display_title: Optional[str] = None,
+        source_link: Optional[str] = None,
     ) -> NoteResult | None:
         """
         主流程：按步骤依次下载、转写、GPT 总结、截图/链接处理、存库、返回 NoteResult。
@@ -116,6 +122,8 @@ class NoteGenerator:
         :param video_understanding: 是否需要视频拼图理解（生成缩略图）
         :param video_interval: 视频帧截取间隔（秒），仅在 video_understanding 为 True 时生效
         :param grid_size: 生成缩略图时的网格大小，如 [3, 3]
+        :param display_title: 面向用户展示的标题；本地缓存文件可使用独立的物理文件名
+        :param source_link: 写入笔记的公开来源链接；空字符串表示不展示内部存储地址
         :return: NoteResult 对象，包含 markdown 文本、转写结果和音频元信息
         """
         if grid_size is None:
@@ -179,6 +187,7 @@ class NoteGenerator:
                 video_url=video_url,
                 quality=quality,
                 audio_cache_file=audio_cache_file,
+                task_id=task_id,
                 status_phase=TaskStatus.DOWNLOADING,
                 platform=platform,
                 output_path=output_path,
@@ -188,6 +197,8 @@ class NoteGenerator:
                 grid_size=grid_size,
                 skip_download=not need_full_download,
             )
+            if display_title and display_title.strip():
+                audio_meta.title = display_title.strip()
 
             # 3. 如果前面没拿到字幕，走转写流程
             if transcript is None:
@@ -224,7 +235,10 @@ class NoteGenerator:
                     platform=platform,
                 )
 
-            markdown = prepend_source_link(markdown, str(video_url))
+            markdown = prepend_source_link(
+                markdown,
+                str(video_url) if source_link is None else source_link,
+            )
 
             # 5. 保存记录到数据库
             self._update_status(task_id, TaskStatus.SAVING)
@@ -372,6 +386,7 @@ class NoteGenerator:
         video_url: Union[str, HttpUrl],
         quality: DownloadQuality,
         audio_cache_file: Path,
+        task_id: Optional[str],
         status_phase: TaskStatus,
         platform: str,
         output_path: Optional[str],
@@ -399,7 +414,6 @@ class NoteGenerator:
         :param grid_size: 缩略图网格尺寸
         :return: AudioDownloadResult 对象
         """
-        task_id = audio_cache_file.stem.split("_")[0]
         self._update_status(task_id, status_phase)
 
         # 已有缓存，尝试加载
@@ -422,14 +436,12 @@ class NoteGenerator:
                         logger.info(f"视频下载完成：{self.video_path}")
 
                         if grid_size:
-                            self.video_img_urls = VideoReader(
-                                video_path=str(self.video_path),
-                                grid_size=tuple(grid_size),
+                            self.video_img_urls = self._read_video_frames(
+                                task_id=task_id,
+                                video_path=self.video_path,
+                                grid_size=grid_size,
                                 frame_interval=frame_interval,
-                                unit_width=960,
-                                unit_height=540,
-                                save_quality=80,
-                            ).run()
+                            )
                         else:
                             logger.info("未指定 grid_size，跳过缩略图生成")
                     except Exception as exc:
@@ -475,14 +487,12 @@ class NoteGenerator:
                 logger.info(f"视频下载完成：{self.video_path}")
 
                 if grid_size:
-                    self.video_img_urls = VideoReader(
-                        video_path=str(self.video_path),
-                        grid_size=tuple(grid_size),
+                    self.video_img_urls = self._read_video_frames(
+                        task_id=task_id,
+                        video_path=self.video_path,
+                        grid_size=grid_size,
                         frame_interval=frame_interval,
-                        unit_width=960,
-                        unit_height=540,
-                        save_quality=80,
-                    ).run()
+                    )
                 else:
                     logger.info("未指定 grid_size，跳过缩略图生成")
             except Exception as exc:
@@ -506,6 +516,45 @@ class NoteGenerator:
             logger.error(f"音频下载失败：{exc}")
             self._handle_exception(task_id, exc)
             raise
+
+    @staticmethod
+    def _read_video_frames(
+        task_id: Optional[str],
+        video_path: Path,
+        grid_size: List[int],
+        frame_interval: int,
+    ) -> List[str]:
+        """Extract understanding frames in a task-isolated, disposable workspace."""
+        workspace_name = re.sub(r"[^A-Za-z0-9._-]", "_", task_id or "")[:128]
+        if not workspace_name:
+            workspace_name = f"anonymous-{os.getpid()}-{id(video_path)}"
+        work_root = Path(get_app_dir("video_tasks")) / workspace_name
+        frame_dir = work_root / "frames"
+        grid_dir = work_root / "grids"
+
+        # A retry receives a new task id, but clearing a stale same-id workspace
+        # also makes recovery deterministic after an interrupted process.
+        shutil.rmtree(work_root, ignore_errors=True)
+        frame_dir.mkdir(parents=True, exist_ok=True)
+        grid_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            return VideoReader(
+                video_path=str(video_path),
+                grid_size=tuple(grid_size),
+                frame_interval=frame_interval,
+                unit_width=960,
+                unit_height=540,
+                save_quality=80,
+                frame_dir=str(frame_dir),
+                grid_dir=str(grid_dir),
+            ).run()
+        finally:
+            try:
+                shutil.rmtree(work_root)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning("清理视频理解临时目录失败 (%s): %s", work_root, exc)
 
 
     def _get_transcript(

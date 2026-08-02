@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import shutil
 import tempfile
 import uuid
 import zipfile
@@ -20,6 +21,7 @@ from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
 from app.services.note import NoteGenerator, logger
 from app.services.task_serial_executor import task_serial_executor
+from app.services.single_task_history_service import single_task_history_service
 from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id
 from app.validators.video_url_validator import is_supported_video_url
@@ -220,6 +222,11 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             # 正常新建任务
             task_id = str(uuid.uuid4())
 
+        single_task_history_service.persist_request(
+            task_id,
+            data.model_dump(mode="json"),
+        )
+
         # 统一先写入 PENDING，表示已进入队列等待串行执行
         NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
 
@@ -236,6 +243,39 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         return R.success({"task_id": task_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/single/tasks")
+def list_single_tasks(page: int = 1, page_size: int = 20):
+    return R.success(single_task_history_service.list_tasks(page, page_size))
+
+
+@router.post("/single/tasks/{task_id}/regenerate")
+def regenerate_single_task(task_id: str, background_tasks: BackgroundTasks):
+    request_data = single_task_history_service.get_request(task_id)
+    if not request_data:
+        return R.error(msg="该历史任务缺少原始生成配置，无法重新生成", code=400404)
+    source_url = str(request_data.get("video_url") or "")
+    if source_url.startswith("/uploads/") and not (Path.cwd() / source_url.lstrip("/")).is_file():
+        return R.error(msg="原本地视频文件已不存在，无法重新生成", code=400410)
+
+    payload = {
+        key: value
+        for key, value in request_data.items()
+        if key not in {"task_id", "created_at", "has_prefetched_transcript"}
+    }
+    transcript_path = Path(NOTE_OUTPUT_DIR) / f"{task_id}_transcript.json"
+    if request_data.get("has_prefetched_transcript") and transcript_path.exists():
+        try:
+            payload["prefetched_transcript"] = json.loads(transcript_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+
+    try:
+        data = VideoRequest(**payload)
+    except Exception as exc:
+        return R.error(msg=f"历史生成配置已失效：{exc}", code=400422)
+    return generate_note(data, background_tasks)
 
 
 @router.get("/task_status/{task_id}")
@@ -271,7 +311,11 @@ def get_task_status(task_id: str):
                 })
 
         if status == TaskStatus.FAILED.value:
-            return R.error(message or "任务失败", code=500)
+            return R.success({
+                "status": status,
+                "message": message or "任务失败",
+                "task_id": task_id,
+            })
 
         # 处理中状态
         return R.success({
@@ -391,13 +435,18 @@ def export_note(task_id: str):
     safe_title = re.sub(r'[\\/:*?"<>|]', '_', title).strip() or "note"
 
     screenshots_dir = Path("static/screenshots")
+    temporary_screenshot_dir: Optional[Path] = None
     image_filenames = []  # 要打包的截图文件名列表
     rewritten_md = markdown_text
 
     # 情况1：已有 ![](/static/screenshots/...) 引用（post-processing 已执行）
     if _SCREENSHOT_REF_RE.search(markdown_text):
         rewritten_md = _SCREENSHOT_REF_RE.sub(r'![\1](screenshots/\2)', markdown_text)
-        image_filenames = list(set(fn for _, fn in _SCREENSHOT_REF_RE.findall(markdown_text)))
+        screenshots_root = screenshots_dir.resolve()
+        for filename in dict.fromkeys(fn for _, fn in _SCREENSHOT_REF_RE.findall(markdown_text)):
+            candidate = (screenshots_dir / filename).resolve()
+            if screenshots_root in candidate.parents and candidate.is_file():
+                image_filenames.append(filename)
 
     # 情况2：有原始 *Screenshot-[mm:ss]* 标记（post-processing 未执行，需要现场生成截图）
     elif _RAW_MARKER_RE.search(markdown_text):
@@ -409,6 +458,7 @@ def export_note(task_id: str):
         # 从标记中提取时间戳并生成截图
         timestamps = extract_screenshot_timestamps(markdown_text)
         tmp_dir = Path(tempfile.mkdtemp(prefix="bili_export_"))
+        temporary_screenshot_dir = tmp_dir
         for idx, (marker, ts) in enumerate(timestamps):
             try:
                 img_path = generate_screenshot(str(video_path), str(tmp_dir), ts, idx)
@@ -436,30 +486,28 @@ def export_note(task_id: str):
                 if img_path.exists():
                     zf.write(img_path, f"screenshots/{filename}")
 
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
-        tmp.write(zip_buffer.getvalue())
-        tmp.close()
         encoded_name = quote(f"{safe_title}.zip")
-        return FileResponse(
-            path=tmp.name,
+        response = Response(
+            content=zip_buffer.getvalue(),
             media_type="application/zip",
-            filename=f"{safe_title}.zip",
             headers={
                 "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
                 "Content-Encoding": "identity",
             },
         )
+        if temporary_screenshot_dir:
+            shutil.rmtree(temporary_screenshot_dir, ignore_errors=True)
+        return response
     else:
         # 无截图，直接返回 .md 文件
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".md")
-        tmp.write(rewritten_md.encode("utf-8"))
-        tmp.close()
         encoded_name = quote(f"{safe_title}.md")
-        return FileResponse(
-            path=tmp.name,
+        response = Response(
+            content=rewritten_md.encode("utf-8"),
             media_type="text/markdown; charset=utf-8",
-            filename=f"{safe_title}.md",
             headers={
                 "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
             },
         )
+        if temporary_screenshot_dir:
+            shutil.rmtree(temporary_screenshot_dir, ignore_errors=True)
+        return response

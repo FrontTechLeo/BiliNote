@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -14,7 +16,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 from fastapi import HTTPException
@@ -27,6 +29,7 @@ from app.enmus.task_status_enums import TaskStatus
 from app.services.cookie_manager import CookieConfigManager
 from app.services.task_serial_executor import task_serial_executor
 from app.utils.logger import get_logger
+from app.utils.note_helper import remove_internal_local_source_link
 
 logger = get_logger(__name__)
 
@@ -34,7 +37,11 @@ _IMAGE_REF = re.compile(r'!\[([^\]]*)\]\(/static/screenshots/([^)]+)\)')
 _BV_RE = re.compile(r'BV[0-9A-Za-z]+')
 _VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 _TERMINAL = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value}
+_BATCH_TERMINAL = {"SUCCESS", "FAILED", "PARTIAL_FAILED"}
 NOTE_OUTPUT_DIR = Path(os.getenv("NOTE_OUTPUT_DIR", "note_results"))
+LOCAL_UPLOAD_ROOT = Path("uploads") / "batch_videos"
+LOCAL_PREVIEW_ROOT = Path("uploads") / "batch_previews"
+LOCAL_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 class BilibiliCollectionResolver:
@@ -168,42 +175,215 @@ class BatchTaskService:
     def preview_bilibili(self, source_url: str) -> dict[str, Any]:
         return self._resolver.resolve(source_url)
 
+    def preview_append_bilibili(self, batch_id: str, source_url: str) -> dict[str, Any]:
+        resolved = self._resolver.resolve(source_url)
+        items, skipped_count = self._filter_new_items(batch_id, resolved.get("items") or [], "bilibili")
+        return {
+            "title": resolved.get("title") or "哔哩哔哩合集",
+            "items": items,
+            "discovered_count": len(resolved.get("items") or []),
+            "skipped_count": skipped_count,
+        }
+
+    @staticmethod
+    def _natural_sort_key(value: str) -> list[tuple[int, Any]]:
+        """Sort human-facing filenames so 2 comes before 10."""
+        return [
+            (0, int(part)) if part.isdigit() else (1, part.casefold())
+            for part in re.split(r"(\d+)", value)
+            if part
+        ]
+
+    @staticmethod
+    def _sampled_local_digest(target: Path) -> str:
+        size = target.stat().st_size
+        sample_size = 1024 * 1024
+        offsets = {
+            0,
+            max(0, (size - sample_size) // 2),
+            max(0, size - sample_size),
+        }
+        digest = hashlib.sha256(str(size).encode("ascii"))
+        with target.open("rb") as source:
+            for offset in sorted(offsets):
+                source.seek(offset)
+                digest.update(str(offset).encode("ascii"))
+                digest.update(source.read(sample_size))
+        return digest.hexdigest()
+
+    def cleanup_local_upload_cache(self, max_age_seconds: int = LOCAL_CACHE_MAX_AGE_SECONDS) -> dict[str, int]:
+        """Remove abandoned uploads while retaining every file referenced by a batch item."""
+        db = SessionLocal()
+        try:
+            referenced = {
+                str(row[0])
+                for row in db.query(BatchTaskItem.source_url)
+                .filter(BatchTaskItem.platform == "local")
+                .all()
+            }
+        finally:
+            db.close()
+
+        cutoff = time.time() - max(0, max_age_seconds)
+        removed_files = 0
+        removed_dirs = 0
+        cache_root = (Path.cwd() / LOCAL_UPLOAD_ROOT).resolve()
+        if cache_root.exists():
+            for path in cache_root.iterdir():
+                source_url = "/" + path.relative_to(Path.cwd()).as_posix()
+                if path.is_file() and source_url not in referenced and path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+                    removed_files += 1
+
+        preview_root = (Path.cwd() / LOCAL_PREVIEW_ROOT).resolve()
+        if preview_root.exists():
+            for directory in preview_root.iterdir():
+                if not directory.is_dir():
+                    continue
+                for path in directory.rglob("*"):
+                    if not path.is_file():
+                        continue
+                    source_url = "/" + path.relative_to(Path.cwd()).as_posix()
+                    if source_url not in referenced and path.stat().st_mtime < cutoff:
+                        path.unlink(missing_ok=True)
+                        removed_files += 1
+                if not any(path.is_file() for path in directory.rglob("*")):
+                    shutil.rmtree(directory)
+                    removed_dirs += 1
+        if removed_files or removed_dirs:
+            logger.info("已清理本地批量视频孤儿缓存: files=%s preview_dirs=%s", removed_files, removed_dirs)
+        return {"removed_files": removed_files, "removed_dirs": removed_dirs}
+
     def store_local_preview(self, files: Iterable[Any]) -> dict[str, Any]:
+        self.cleanup_local_upload_cache()
         preview_id = str(uuid.uuid4())
-        root = Path("uploads") / "batch_previews" / preview_id
+        root = LOCAL_PREVIEW_ROOT / preview_id
+        cache_root = LOCAL_UPLOAD_ROOT
         root.mkdir(parents=True, exist_ok=True)
+        cache_root.mkdir(parents=True, exist_ok=True)
         items = []
-        for index, uploaded in enumerate(files, start=1):
-            suffix = Path(uploaded.filename or "").suffix.lower()
-            if suffix not in _VIDEO_EXTENSIONS:
-                continue
-            filename = Path(uploaded.filename or f"video-{index}{suffix}").name
-            target = root / filename
-            duplicate = 1
-            while target.exists():
-                target = root / f"{Path(filename).stem}-{duplicate}{suffix}"
-                duplicate += 1
-            with target.open("wb") as output:
-                while chunk := uploaded.file.read(1024 * 1024):
-                    output.write(chunk)
-            items.append({
-                "title": target.stem,
-                "source_url": "/" + target.as_posix(),
-                "platform": "local",
-                "position": len(items) + 1,
-            })
+        discovered_count = 0
+        duplicate_count = 0
+        seen_sources: set[str] = set()
+        uploads = sorted(
+            list(files),
+            key=lambda uploaded: self._natural_sort_key(Path(uploaded.filename or "").name),
+        )
+        try:
+            for index, uploaded in enumerate(uploads, start=1):
+                suffix = Path(uploaded.filename or "").suffix.lower()
+                if suffix not in _VIDEO_EXTENSIONS:
+                    continue
+                discovered_count += 1
+                filename = Path(uploaded.filename or f"video-{index}{suffix}").name
+                temporary = root / f"{index:06d}{suffix}.uploading"
+                with temporary.open("wb") as output:
+                    while chunk := uploaded.file.read(1024 * 1024):
+                        output.write(chunk)
+                fingerprint = self._sampled_local_digest(temporary)
+                existing = next(cache_root.glob(f"{fingerprint}.*"), None)
+                target = existing or cache_root / f"{fingerprint}{suffix}"
+                if existing:
+                    temporary.unlink(missing_ok=True)
+                else:
+                    temporary.replace(target)
+                source_url = "/" + target.as_posix()
+                if source_url in seen_sources:
+                    duplicate_count += 1
+                    continue
+                seen_sources.add(source_url)
+                items.append({
+                    "title": Path(filename).stem,
+                    "source_url": source_url,
+                    "platform": "local",
+                    "position": len(items) + 1,
+                })
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
         if not items:
             raise ValueError("文件夹中没有可处理的视频文件")
-        return {"preview_id": preview_id, "title": "本地视频文件夹", "items": items}
+        return {
+            "preview_id": preview_id,
+            "title": "本地视频文件夹",
+            "items": items,
+            "discovered_count": discovered_count,
+            "duplicate_count": duplicate_count,
+        }
+
+    def preview_append_local(self, batch_id: str, files: Iterable[Any]) -> dict[str, Any]:
+        preview = self.store_local_preview(files)
+        items, skipped_count = self._filter_new_items(batch_id, preview["items"], "local")
+        return {
+            **preview,
+            "items": items,
+            "skipped_count": skipped_count + int(preview.get("duplicate_count") or 0),
+        }
 
     @staticmethod
     def _validate_local_source(source_url: str) -> None:
-        if not source_url.startswith("/uploads/batch_previews/"):
-            raise ValueError("本地文件必须来自当前批量上传会话")
-        base = (Path.cwd() / "uploads" / "batch_previews").resolve()
+        allowed_roots = [
+            (Path.cwd() / LOCAL_UPLOAD_ROOT).resolve(),
+            (Path.cwd() / LOCAL_PREVIEW_ROOT).resolve(),
+        ]
         target = (Path.cwd() / source_url.lstrip("/")).resolve()
-        if base not in target.parents or not target.is_file():
+        if not any(base in target.parents for base in allowed_roots) or not target.is_file():
             raise ValueError("本地文件不存在或不在允许的上传目录中")
+
+    @staticmethod
+    def _source_key(platform: str, source_url: str) -> str:
+        if platform == "local":
+            BatchTaskService._validate_local_source(source_url)
+            target = (Path.cwd() / source_url.lstrip("/")).resolve()
+            if target.parent.name == LOCAL_UPLOAD_ROOT.name and re.fullmatch(r"[0-9a-f]{64}", target.stem):
+                return f"local-sampled:{target.stem}"
+            return f"local-sampled:{BatchTaskService._sampled_local_digest(target)}"
+        if platform == "bilibili":
+            match = _BV_RE.search(source_url)
+            if match:
+                page = (parse_qs(urlsplit(source_url).query).get("p") or ["1"])[0]
+                return f"bilibili:{match.group(0)}:p{page}"
+        return f"{platform}:{source_url.strip().rstrip('/')}"
+
+    def _filter_new_items(
+        self,
+        batch_id: str,
+        items: list[dict[str, Any]],
+        expected_source_type: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        db = SessionLocal()
+        try:
+            task = db.get(BatchTask, batch_id)
+            if not task:
+                raise KeyError("批量任务不存在")
+            existing = db.query(BatchTaskItem).filter_by(batch_id=batch_id).all()
+            existing_keys = {self._source_key(row.platform, row.source_url) for row in existing}
+        finally:
+            db.close()
+
+        filtered: list[dict[str, Any]] = []
+        seen = set(existing_keys)
+        skipped_count = 0
+        for raw in items:
+            source_url = str(raw.get("source_url") or "")
+            platform = str(raw.get("platform") or expected_source_type or "")
+            if platform not in {"bilibili", "local"}:
+                raise ValueError("仅支持追加哔哩哔哩视频或本地视频")
+            if expected_source_type and platform != expected_source_type:
+                raise ValueError("视频来源与当前追加方式不一致")
+            if not source_url:
+                raise ValueError("视频链接不能为空")
+            key = self._source_key(platform, source_url)
+            if key in seen:
+                skipped_count += 1
+                continue
+            seen.add(key)
+            filtered.append({
+                "title": str(raw.get("title") or f"视频 {len(filtered) + 1}"),
+                "source_url": source_url,
+                "platform": platform,
+                "position": len(filtered) + 1,
+            })
+        return filtered, skipped_count
 
     def create_task(self, title: str, source_type: str, source_value: str | None, config: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
         if source_type not in {"bilibili", "local"}:
@@ -238,6 +418,67 @@ class BatchTaskService:
                 ))
             db.commit()
             result = self._serialize_task(task)
+        finally:
+            db.close()
+        self.start(batch_id)
+        return result
+
+    def append_items(self, batch_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+        if not items:
+            raise ValueError("至少选择一个待追加视频")
+        db = SessionLocal()
+        try:
+            task = db.get(BatchTask, batch_id)
+            if not task:
+                raise KeyError("批量任务不存在")
+            if task.status not in _BATCH_TERMINAL:
+                raise ValueError("只有已结束的批量任务可以追加视频")
+        finally:
+            db.close()
+
+        new_items, skipped_count = self._filter_new_items(batch_id, items)
+        if not new_items:
+            raise ValueError("所选视频均已存在于当前批量任务中")
+
+        db = SessionLocal()
+        try:
+            task = db.get(BatchTask, batch_id)
+            if not task:
+                raise KeyError("批量任务不存在")
+            if task.status not in _BATCH_TERMINAL:
+                raise ValueError("批量任务状态已变化，请刷新后重试")
+            last_position = db.query(BatchTaskItem.position).filter_by(batch_id=batch_id).order_by(BatchTaskItem.position.desc()).first()
+            next_position = int(last_position[0] if last_position else 0) + 1
+            added: list[BatchTaskItem] = []
+            for offset, raw in enumerate(new_items):
+                item = BatchTaskItem(
+                    id=str(uuid.uuid4()),
+                    batch_id=batch_id,
+                    source_url=raw["source_url"],
+                    platform=raw["platform"],
+                    title=raw["title"],
+                    position=next_position + offset,
+                    status=TaskStatus.PENDING.value,
+                    stage=TaskStatus.PENDING.value,
+                    message="追加成功，等待执行",
+                )
+                db.add(item)
+                db.add(BatchTaskEvent(
+                    batch_item_id=item.id,
+                    status=TaskStatus.PENDING.value,
+                    message="用户追加视频到批量任务",
+                ))
+                added.append(item)
+            task.finished_at = None
+            db.flush()
+            self._refresh_counts(db, batch_id)
+            db.commit()
+            result = {
+                "task": self._serialize_task(task),
+                "added_items": [self._serialize_item(item) for item in added],
+                "added_count": len(added),
+                "skipped_count": skipped_count,
+            }
         finally:
             db.close()
         self.start(batch_id)
@@ -318,22 +559,49 @@ class BatchTaskService:
             db.close()
 
     def _submit_item(self, item_id: str) -> Any:
+        task_id = str(uuid.uuid4())
         db = SessionLocal()
         try:
-            item = db.get(BatchTaskItem, item_id)
-            if not item or item.status != TaskStatus.PENDING.value:
+            claimed = (
+                db.query(BatchTaskItem)
+                .filter(
+                    BatchTaskItem.id == item_id,
+                    BatchTaskItem.status == TaskStatus.PENDING.value,
+                )
+                .update(
+                    {
+                        BatchTaskItem.task_id: task_id,
+                        BatchTaskItem.status: TaskStatus.PARSING.value,
+                        BatchTaskItem.stage: TaskStatus.PARSING.value,
+                        BatchTaskItem.attempts: BatchTaskItem.attempts + 1,
+                        BatchTaskItem.message: "任务已进入执行队列",
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if claimed != 1:
+                db.rollback()
                 return None
-            item.task_id = str(uuid.uuid4())
-            item.attempts += 1
-            item.message = "任务已进入执行队列"
-            db.add(BatchTaskEvent(batch_item_id=item.id, status=TaskStatus.PENDING.value, message=item.message))
-            task_id = item.task_id
+
+            item = db.get(BatchTaskItem, item_id)
+            db.add(BatchTaskEvent(
+                batch_item_id=item.id,
+                status=TaskStatus.PARSING.value,
+                message=item.message,
+            ))
             batch_id = item.batch_id
+            self._refresh_counts(db, batch_id)
             db.commit()
         finally:
             db.close()
-        self.sync_child_status(task_id, TaskStatus.PENDING.value, "任务已进入执行队列")
-        future = task_serial_executor.submit(self._run_item, item_id, task_id)
+
+        try:
+            future = task_serial_executor.submit(self._run_item, item_id, task_id)
+        except Exception as exc:
+            logger.exception("批量子任务提交失败: batch=%s item=%s", batch_id, item_id)
+            self.sync_child_status(task_id, TaskStatus.FAILED.value, f"任务提交失败：{exc}")
+            return None
+
         logger.info("批量子任务已提交: batch=%s item=%s", batch_id, item_id)
         return future
 
@@ -359,6 +627,8 @@ class BatchTaskService:
                 _format=config.get("format") or [], style=config.get("style"), extras=config.get("extras"),
                 video_understanding=bool(config.get("video_understanding", False)),
                 video_interval=int(config.get("video_interval") or 0), grid_size=config.get("grid_size") or [],
+                display_title=item.title,
+                source_link="" if platform == "local" else source_url,
             )
             if not note or not note.markdown:
                 return
@@ -430,6 +700,7 @@ class BatchTaskService:
         return result
 
     def recover_incomplete_batches(self) -> None:
+        self.cleanup_local_upload_cache()
         db = SessionLocal()
         try:
             batches = db.query(BatchTask).filter(BatchTask.status.in_(["PENDING", "RUNNING"])).all()
@@ -484,6 +755,8 @@ class BatchTaskService:
                 markdown = self._load_markdown(item.task_id or "")
                 if not markdown:
                     continue
+                if item.platform == "local":
+                    markdown = remove_internal_local_source_link(markdown) or ""
                 prefix = f"{item.position:03d}-{self._safe_name(item.title)}"
                 image_dir = f"images/{prefix}"
                 images = []

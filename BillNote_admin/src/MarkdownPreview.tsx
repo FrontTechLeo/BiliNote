@@ -4,10 +4,13 @@ import { Button, Empty, Image, Message, Space, Tag, Tooltip } from '@arco-design
 import {
   IconBook, IconCopy, IconDownload, IconLink, IconMenu, IconUp,
 } from '@arco-design/web-react/icon'
+import katex from 'katex'
+import 'katex/dist/katex.min.css'
 
 type MarkdownBlock =
   | { type: 'heading'; level: number; text: string; id: string }
   | { type: 'paragraph'; text: string }
+  | { type: 'math'; value: string }
   | { type: 'image'; alt: string; src: string }
   | { type: 'code'; language: string; value: string }
   | { type: 'quote'; text: string }
@@ -49,6 +52,7 @@ function plainText(value: string) {
     .replace(/\*?Content-\[[^\]]+]\*?/gi, '')
     .replace(/!\[([^\]]*)]\([^)]+\)/g, '$1')
     .replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
+    .replace(/\${1,2}([^$]+)\${1,2}/g, '$1')
     .replace(/[*_~`]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -84,6 +88,7 @@ function isBlockStart(lines: string[], index: number) {
   const line = lines[index] || ''
   if (!line.trim()) return true
   if (/^```/.test(line.trim())) return true
+  if (/^\s*(\$\$|\\\[)/.test(line)) return true
   if (/^#{1,6}\s+/.test(line)) return true
   if (/^\s*([-+*]|\d+\.)\s+/.test(line)) return true
   if (/^>\s?/.test(line)) return true
@@ -123,6 +128,33 @@ function parseMarkdown(markdown: string): MarkdownDocument {
       }
       if (index < lines.length) index += 1
       blocks.push({ type: 'code', language: fence[1] || 'text', value: code.join('\n') })
+      continue
+    }
+
+    const mathStart = line.trim()
+    if (mathStart.startsWith('$$') || mathStart.startsWith('\\[')) {
+      const open = mathStart.startsWith('$$') ? '$$' : '\\['
+      const close = open === '$$' ? '$$' : '\\]'
+      const formula: string[] = []
+      let current = mathStart.slice(open.length)
+      if (current.endsWith(close)) {
+        formula.push(current.slice(0, -close.length))
+        index += 1
+      } else {
+        if (current) formula.push(current)
+        index += 1
+        while (index < lines.length) {
+          current = lines[index].trim()
+          if (current.endsWith(close)) {
+            formula.push(current.slice(0, -close.length))
+            index += 1
+            break
+          }
+          formula.push(lines[index])
+          index += 1
+        }
+      }
+      blocks.push({ type: 'math', value: formula.join('\n').trim() })
       continue
     }
 
@@ -214,12 +246,35 @@ function downloadMarkdown(content: string, title: string) {
   URL.revokeObjectURL(link.href)
 }
 
+function renderMath(value: string, displayMode: boolean, key: string) {
+  try {
+    const html = katex.renderToString(value, {
+      displayMode,
+      output: 'htmlAndMathml',
+      strict: 'ignore',
+      throwOnError: true,
+      trust: false,
+    })
+    const TagName = displayMode ? 'div' : 'span'
+    return (
+      <TagName
+        key={key}
+        className={displayMode ? 'markdown-math-block' : 'markdown-math-inline'}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    )
+  } catch {
+    const source = displayMode ? `$$${value}$$` : `$${value}$`
+    return <code key={key} className="markdown-math-error" title="公式语法无法解析">{source}</code>
+  }
+}
+
 function renderInline(
   text: string,
   keyPrefix: string,
   onAnchorClick: (event: MouseEvent<HTMLAnchorElement>, href: string) => void,
 ): ReactNode[] {
-  const tokenPattern = /(!\[[^\]]*]\([^)]+\)|\[[^\]]+]\([^)]+\)|`[^`]+`|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*Content-\[[^\]]+]\*|\*[^*\n]+\*)/g
+  const tokenPattern = /(!\[[^\]]*]\([^)]+\)|\[[^\]]+]\([^)]+\)|`[^`]+`|\$[^$\n]+\$|\*\*[^*\n]+\*\*|~~[^~\n]+~~|\*Content-\[[^\]]+]\*|\*[^*\n]+\*)/g
   const nodes: ReactNode[] = []
   let cursor = 0
   let match: RegExpExecArray | null
@@ -258,6 +313,8 @@ function renderInline(
       )
     } else if (token.startsWith('`')) {
       nodes.push(<code key={key} className="markdown-inline-code">{token.slice(1, -1)}</code>)
+    } else if (token.startsWith('$')) {
+      nodes.push(renderMath(token.slice(1, -1), false, key))
     } else if (token.startsWith('**')) {
       nodes.push(<strong key={key}>{renderInline(token.slice(2, -2), `${key}-strong`, onAnchorClick)}</strong>)
     } else if (token.startsWith('~~')) {
@@ -457,6 +514,9 @@ export default function MarkdownPreview({
               }
               if (block.type === 'paragraph') {
                 return <p key={key}>{renderInline(block.text, key, handleAnchorClick)}</p>
+              }
+              if (block.type === 'math') {
+                return renderMath(block.value, true, key)
               }
               if (block.type === 'image') {
                 return (
