@@ -23,7 +23,7 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 
 from app.db.engine import SessionLocal
-from app.db.models.video_tasks import BatchTask, BatchTaskEvent, BatchTaskItem
+from app.db.models.video_tasks import BatchTask, BatchTaskEvent, BatchTaskItem, VideoTask
 from app.enmus.note_enums import DownloadQuality
 from app.enmus.task_status_enums import TaskStatus
 from app.services.cookie_manager import CookieConfigManager
@@ -397,7 +397,7 @@ class BatchTaskService:
         try:
             task = BatchTask(
                 id=batch_id,
-                title=title.strip() or "未命名批量任务",
+                title=(title or "").strip() or ("本地视频批量任务" if source_type == "local" else "哔哩哔哩批量任务"),
                 source_type=source_type,
                 source_value=source_value,
                 config_json=json.dumps(config, ensure_ascii=False),
@@ -422,6 +422,30 @@ class BatchTaskService:
             db.close()
         self.start(batch_id)
         return result
+
+    def update_task(self, batch_id: str, title: str | None = None, config: dict[str, Any] | None = None) -> dict[str, Any]:
+        db = SessionLocal()
+        try:
+            task = db.get(BatchTask, batch_id)
+            if not task:
+                raise KeyError("批量任务不存在")
+            if title is not None:
+                normalized_title = title.strip()
+                if not normalized_title:
+                    raise ValueError("任务名称不能为空")
+                task.title = normalized_title
+            if config is not None:
+                if task.status not in _BATCH_TERMINAL:
+                    raise ValueError("任务执行期间只能修改名称，生成设置请在任务结束后修改")
+                if not config.get("model_name") or not config.get("provider_id"):
+                    raise ValueError("请选择模型和供应商")
+                current_config = json.loads(task.config_json)
+                current_config.update(config)
+                task.config_json = json.dumps(current_config, ensure_ascii=False)
+            db.commit()
+            return self.get_task(batch_id) or self._serialize_task(task)
+        finally:
+            db.close()
 
     def append_items(self, batch_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
         if not items:
@@ -532,7 +556,10 @@ class BatchTaskService:
         task.failed_count = sum(item.status == TaskStatus.FAILED.value for item in items)
         task.running_count = sum(item.status not in _TERMINAL | {TaskStatus.PENDING.value} for item in items)
         pending = any(item.status == TaskStatus.PENDING.value for item in items)
-        if task.total_count and task.completed_count + task.failed_count == task.total_count:
+        if task.total_count == 0:
+            task.status = "SUCCESS"
+            task.finished_at = datetime.utcnow()
+        elif task.completed_count + task.failed_count == task.total_count:
             task.status = "SUCCESS" if task.failed_count == 0 else ("PARTIAL_FAILED" if task.completed_count else "FAILED")
             task.finished_at = datetime.utcnow()
         elif task.running_count or pending:
@@ -698,6 +725,136 @@ class BatchTaskService:
             db.close()
         self.start(batch_id)
         return result
+
+    @staticmethod
+    def _task_output_paths(task_id: str) -> list[Path]:
+        return [
+            NOTE_OUTPUT_DIR / f"{task_id}.json",
+            NOTE_OUTPUT_DIR / f"{task_id}.status.json",
+            NOTE_OUTPUT_DIR / f"{task_id}_audio.json",
+            NOTE_OUTPUT_DIR / f"{task_id}_transcript.json",
+            NOTE_OUTPUT_DIR / f"{task_id}_markdown.md",
+            NOTE_OUTPUT_DIR / f"{task_id}_request.json",
+            NOTE_OUTPUT_DIR / f"{task_id}.status.tmp",
+            NOTE_OUTPUT_DIR / f"{task_id}.gpt.checkpoint.json",
+            NOTE_OUTPUT_DIR / f"{task_id}.gpt.checkpoint.tmp",
+            NOTE_OUTPUT_DIR / f"{task_id}.tmp",
+        ]
+
+    def _cleanup_deleted_item_resources(self, task_ids: list[str], local_sources: list[str]) -> dict[str, int]:
+        image_names: set[str] = set()
+        for task_id in task_ids:
+            result_path = NOTE_OUTPUT_DIR / f"{task_id}.json"
+            if result_path.exists():
+                try:
+                    markdown = json.loads(result_path.read_text(encoding="utf-8")).get("markdown") or ""
+                    image_names.update(Path(match.group(2)).name for match in _IMAGE_REF.finditer(markdown))
+                except (OSError, ValueError, TypeError):
+                    pass
+
+        removed_files = 0
+        for task_id in task_ids:
+            for path in self._task_output_paths(task_id):
+                if path.is_file():
+                    path.unlink(missing_ok=True)
+                    removed_files += 1
+            try:
+                from app.services.vector_store import VectorStoreManager
+                VectorStoreManager().delete_index(task_id)
+            except Exception as exc:
+                logger.debug("清理批量子任务向量索引失败（忽略）: %s", exc)
+
+        remaining_images: set[str] = set()
+        if image_names and NOTE_OUTPUT_DIR.exists():
+            for result_path in NOTE_OUTPUT_DIR.glob("*.json"):
+                if result_path.stem.endswith(("_audio", "_transcript", "_request")):
+                    continue
+                try:
+                    markdown = json.loads(result_path.read_text(encoding="utf-8")).get("markdown") or ""
+                    remaining_images.update(Path(match.group(2)).name for match in _IMAGE_REF.finditer(markdown))
+                except (OSError, ValueError, TypeError):
+                    continue
+        screenshot_root = (Path.cwd() / "static" / "screenshots").resolve()
+        for image_name in image_names - remaining_images:
+            target = (screenshot_root / image_name).resolve()
+            if screenshot_root in target.parents and target.is_file():
+                target.unlink(missing_ok=True)
+                removed_files += 1
+
+        db = SessionLocal()
+        try:
+            referenced_sources = {
+                source
+                for source in local_sources
+                if db.query(BatchTaskItem).filter_by(platform="local", source_url=source).count() > 0
+            }
+        finally:
+            db.close()
+        request_references: set[str] = set()
+        if NOTE_OUTPUT_DIR.exists():
+            for request_path in NOTE_OUTPUT_DIR.glob("*_request.json"):
+                try:
+                    source = json.loads(request_path.read_text(encoding="utf-8")).get("video_url")
+                    if source:
+                        request_references.add(str(source))
+                except (OSError, ValueError, TypeError):
+                    continue
+        allowed_roots = [
+            (Path.cwd() / LOCAL_UPLOAD_ROOT).resolve(),
+            (Path.cwd() / LOCAL_PREVIEW_ROOT).resolve(),
+        ]
+        for source_url in set(local_sources) - referenced_sources - request_references:
+            target = (Path.cwd() / source_url.lstrip("/")).resolve()
+            if any(root in target.parents for root in allowed_roots) and target.is_file():
+                target.unlink(missing_ok=True)
+                removed_files += 1
+                parent = target.parent
+                preview_root = allowed_roots[1]
+                if preview_root in parent.parents and parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+        return {"removed_files": removed_files}
+
+    def delete_items(self, batch_id: str, item_ids: list[str]) -> dict[str, Any]:
+        unique_ids = list(dict.fromkeys(item_ids))
+        if not unique_ids:
+            raise ValueError("请选择要删除的子任务")
+        db = SessionLocal()
+        try:
+            task = db.get(BatchTask, batch_id)
+            if not task:
+                raise KeyError("批量任务不存在")
+            items = db.query(BatchTaskItem).filter(
+                BatchTaskItem.batch_id == batch_id,
+                BatchTaskItem.id.in_(unique_ids),
+            ).all()
+            if len(items) != len(unique_ids):
+                raise KeyError("部分子任务不存在，请刷新后重试")
+            active = [item.title for item in items if item.status not in _TERMINAL]
+            if active:
+                raise ValueError(f"运行中或排队中的子任务不能删除：{active[0]}")
+            task_ids = [item.task_id for item in items if item.task_id]
+            local_sources = [item.source_url for item in items if item.platform == "local"]
+            db.query(BatchTaskEvent).filter(BatchTaskEvent.batch_item_id.in_(unique_ids)).delete(synchronize_session=False)
+            if task_ids:
+                db.query(VideoTask).filter(VideoTask.task_id.in_(task_ids)).delete(synchronize_session=False)
+            for item in items:
+                db.delete(item)
+            db.flush()
+            remaining = db.query(BatchTaskItem).filter_by(batch_id=batch_id).order_by(BatchTaskItem.position).all()
+            for position, item in enumerate(remaining, start=1):
+                item.position = position
+            self._refresh_counts(db, batch_id)
+            db.commit()
+            updated_task = self._serialize_task(task)
+        finally:
+            db.close()
+
+        cleanup = self._cleanup_deleted_item_resources(task_ids, local_sources)
+        return {
+            "task": updated_task,
+            "deleted_count": len(unique_ids),
+            "cleanup": cleanup,
+        }
 
     def recover_incomplete_batches(self) -> None:
         self.cleanup_local_upload_cache()

@@ -24,6 +24,21 @@ export type BatchTask = {
   running_count: number
   progress: number
   created_at?: string
+  config?: BatchGenerationConfig
+}
+
+export type BatchGenerationConfig = {
+  quality: string
+  model_name: string
+  provider_id: string
+  screenshot: boolean
+  link: boolean
+  format: string[]
+  style: string
+  extras?: string
+  video_understanding: boolean
+  video_interval: number
+  grid_size: number[]
 }
 
 export type Provider = { id: string; name: string; base_url: string; type: string; enabled?: number }

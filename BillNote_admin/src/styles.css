@@ -11,7 +11,7 @@ body { margin: 0; min-width: 320px; }
 .batch-row-actions {
   display: inline-flex;
   width: 100%;
-  min-width: 176px;
+  min-width: 238px;
   align-items: center;
   flex-wrap: nowrap;
   white-space: nowrap;

@@ -34,7 +34,7 @@ class BatchConfig(BaseModel):
 
 
 class BatchCreateRequest(BaseModel):
-    title: str
+    title: Optional[str] = None
     source_type: str
     source_value: Optional[str] = None
     config: BatchConfig
@@ -47,6 +47,15 @@ class BatchExportRequest(BaseModel):
 
 class BatchAppendRequest(BaseModel):
     items: list[BatchItemInput]
+
+
+class BatchUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    config: Optional[BatchConfig] = None
+
+
+class BatchDeleteItemsRequest(BaseModel):
+    item_ids: list[str]
 
 
 @router.post("/batch/preview/bilibili")
@@ -69,9 +78,23 @@ def preview_local(files: list[UploadFile] = File(...)):
 def create_batch_task(data: BatchCreateRequest):
     try:
         return R.success(batch_task_service.create_task(
-            data.title, data.source_type, data.source_value, data.config.model_dump(),
+            data.title or "", data.source_type, data.source_value, data.config.model_dump(),
             [item.model_dump() for item in data.items],
         ))
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
+@router.patch("/batch/tasks/{batch_id}")
+def update_batch_task(batch_id: str, data: BatchUpdateRequest):
+    try:
+        return R.success(batch_task_service.update_task(
+            batch_id,
+            title=data.title,
+            config=data.config.model_dump() if data.config is not None else None,
+        ))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
     except ValueError as exc:
         return R.error(msg=str(exc), code=400)
 
@@ -136,6 +159,26 @@ def list_batch_item_events(batch_id: str, item_id: str):
 def retry_batch_item(batch_id: str, item_id: str):
     try:
         return R.success(batch_task_service.retry_item(batch_id, item_id))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
+@router.delete("/batch/tasks/{batch_id}/items/{item_id}")
+def delete_batch_item(batch_id: str, item_id: str):
+    try:
+        return R.success(batch_task_service.delete_items(batch_id, [item_id]))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
+@router.post("/batch/tasks/{batch_id}/items/delete")
+def delete_batch_items(batch_id: str, data: BatchDeleteItemsRequest):
+    try:
+        return R.success(batch_task_service.delete_items(batch_id, data.item_ids))
     except KeyError as exc:
         return R.error(msg=str(exc), code=404)
     except ValueError as exc:

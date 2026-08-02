@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.services.batch_task_service as batch_module
 from app.db.engine import Base
-from app.db.models.video_tasks import BatchTask, BatchTaskItem
+from app.db.models.video_tasks import BatchTask, BatchTaskEvent, BatchTaskItem, VideoTask
 from app.services.batch_task_service import BilibiliCollectionResolver, BatchTaskService
 from app.enmus.task_status_enums import TaskStatus
 
@@ -435,3 +435,135 @@ def test_submit_item_claims_pending_row_before_executor_submission(tmp_path, mon
     assert item.attempts == 1
     assert item.task_id
     db.close()
+
+
+def test_batch_task_name_fallback_and_terminal_settings_update(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'batch-settings.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(batch_module, "SessionLocal", session_factory)
+
+    service = BatchTaskService()
+    config = {"model_name": "old-model", "provider_id": "old-provider", "quality": "medium"}
+    with patch.object(service, "start"):
+        created = service.create_task("  ", "bilibili", "https://example.test/list", config, [{
+            "title": "第一课",
+            "source_url": "https://example.test/video",
+            "platform": "bilibili",
+        }])
+    assert created["title"] == "哔哩哔哩批量任务"
+
+    renamed = service.update_task(created["id"], title="  新课程名称  ")
+    assert renamed["title"] == "新课程名称"
+    with pytest.raises(ValueError, match="任务执行期间只能修改名称"):
+        service.update_task(created["id"], config={"model_name": "new-model", "provider_id": "new-provider"})
+
+    db = session_factory()
+    task = db.get(BatchTask, created["id"])
+    task.status = "SUCCESS"
+    db.commit()
+    db.close()
+
+    updated = service.update_task(created["id"], config={
+        "model_name": "new-model",
+        "provider_id": "new-provider",
+        "style": "tutorial",
+    })
+    assert updated["config"]["model_name"] == "new-model"
+    assert updated["config"]["quality"] == "medium"
+    assert updated["config"]["style"] == "tutorial"
+
+
+def test_delete_batch_items_cleans_unique_resources_and_keeps_shared_resources(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'batch-delete.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(batch_module, "SessionLocal", session_factory)
+    monkeypatch.setattr(batch_module, "NOTE_OUTPUT_DIR", tmp_path / "notes")
+    monkeypatch.chdir(tmp_path)
+
+    uploads = tmp_path / "uploads" / "batch_videos"
+    uploads.mkdir(parents=True)
+    deleted_source = uploads / "deleted.mp4"
+    retained_source = uploads / "retained.mp4"
+    deleted_source.write_bytes(b"deleted")
+    retained_source.write_bytes(b"retained")
+    screenshots = tmp_path / "static" / "screenshots"
+    screenshots.mkdir(parents=True)
+    deleted_image = screenshots / "deleted.jpg"
+    shared_image = screenshots / "shared.jpg"
+    deleted_image.write_bytes(b"deleted-image")
+    shared_image.write_bytes(b"shared-image")
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "task-delete.json").write_text(json.dumps({
+        "markdown": "![](/static/screenshots/deleted.jpg)\n![](/static/screenshots/shared.jpg)",
+    }), encoding="utf-8")
+    (notes / "task-keep.json").write_text(json.dumps({
+        "markdown": "![](/static/screenshots/shared.jpg)",
+    }), encoding="utf-8")
+    for suffix in (".status.json", "_audio.json", "_transcript.json", "_markdown.md", "_request.json", ".status.tmp", ".gpt.checkpoint.json", ".gpt.checkpoint.tmp"):
+        (notes / f"task-delete{suffix}").write_text("{}", encoding="utf-8")
+
+    db = session_factory()
+    db.add(BatchTask(
+        id="delete-batch", title="删除测试", source_type="local", config_json="{}",
+        status="SUCCESS", total_count=2, completed_count=2,
+    ))
+    db.add_all([
+        BatchTaskItem(
+            id="item-delete", batch_id="delete-batch", task_id="task-delete",
+            source_url="/uploads/batch_videos/deleted.mp4", platform="local", title="删除课程",
+            position=1, status=TaskStatus.SUCCESS.value,
+        ),
+        BatchTaskItem(
+            id="item-keep", batch_id="delete-batch", task_id="task-keep",
+            source_url="/uploads/batch_videos/retained.mp4", platform="local", title="保留课程",
+            position=2, status=TaskStatus.SUCCESS.value,
+        ),
+    ])
+    db.add(BatchTaskEvent(batch_item_id="item-delete", status="SUCCESS", message="完成"))
+    db.add(VideoTask(video_id="deleted-video", platform="local", task_id="task-delete"))
+    db.commit()
+    db.close()
+
+    fake_vector_module = type(sys)("app.services.vector_store")
+    fake_vector_module.VectorStoreManager = MagicMock
+    with patch.dict(sys.modules, {"app.services.vector_store": fake_vector_module}):
+        result = BatchTaskService().delete_items("delete-batch", ["item-delete"])
+
+    assert result["deleted_count"] == 1
+    assert result["task"]["total_count"] == 1
+    assert result["task"]["completed_count"] == 1
+    assert not deleted_source.exists()
+    assert retained_source.exists()
+    assert not deleted_image.exists()
+    assert shared_image.exists()
+    assert not (notes / "task-delete.json").exists()
+    assert (notes / "task-keep.json").exists()
+
+    db = session_factory()
+    remaining = db.query(BatchTaskItem).filter_by(batch_id="delete-batch").all()
+    assert [(item.id, item.position) for item in remaining] == [("item-keep", 1)]
+    assert db.query(BatchTaskEvent).filter_by(batch_item_id="item-delete").count() == 0
+    assert db.query(VideoTask).filter_by(task_id="task-delete").count() == 0
+    db.close()
+
+
+def test_delete_batch_items_rejects_active_children(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'batch-delete-active.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(batch_module, "SessionLocal", session_factory)
+
+    db = session_factory()
+    db.add(BatchTask(id="active-batch", title="执行中", source_type="local", config_json="{}", status="RUNNING", total_count=1))
+    db.add(BatchTaskItem(
+        id="active-item", batch_id="active-batch", source_url="/uploads/batch_videos/active.mp4",
+        platform="local", title="执行中的课程", position=1, status=TaskStatus.TRANSCRIBING.value,
+    ))
+    db.commit()
+    db.close()
+
+    with pytest.raises(ValueError, match="运行中或排队中的子任务不能删除"):
+        BatchTaskService().delete_items("active-batch", ["active-item"])

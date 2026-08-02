@@ -2,10 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Alert, Button, Card, Checkbox, Descriptions, Drawer, Empty, Form, Input, Layout, Menu, Message, Modal,
-  Progress, Radio, Select, Space, Steps, Switch, Table, Tabs, Tag, Tooltip,
+  Popconfirm, Progress, Radio, Select, Space, Steps, Switch, Table, Tabs, Tag, Tooltip,
 } from '@arco-design/web-react'
 import {
-  IconApps, IconCloud, IconDownload, IconLink, IconPlus, IconRefresh, IconRobot, IconSettings, IconStorage, IconUpload,
+  IconApps, IconCloud, IconDelete, IconDownload, IconEdit, IconLink, IconPlus, IconRefresh, IconRobot, IconSettings, IconStorage, IconUpload,
 } from '@arco-design/web-react/icon'
 import { api, downloadBlob } from './api'
 import MarkdownPreview from './MarkdownPreview'
@@ -348,10 +348,12 @@ function CreateBatchModal({ visible, onClose, onCreated }: { visible: boolean; o
   }
   const create = async () => {
     try {
-      const config = await configForm.validate()
+      const values = await configForm.validate()
       if (!preview || !selected.length) throw new Error('至少选择一个视频')
       setLoading(true)
-      await api.post('/batch/tasks', { title: preview.title, source_type: sourceType, source_value: sourceForm.getFieldValue('source_url'), config: { ...normaliseOptions(config), link: config.format?.includes('link'), screenshot: config.format?.includes('screenshot') }, items: preview.items.filter((item) => selected.includes(item.source_url)) })
+      const { task_name: taskName, ...configValues } = values
+      const config = normaliseOptions(configValues)
+      await api.post('/batch/tasks', { title: taskName?.trim() || preview.title, source_type: sourceType, source_value: sourceForm.getFieldValue('source_url'), config: { ...config, link: config.format?.includes('link'), screenshot: config.format?.includes('screenshot') }, items: preview.items.filter((item) => selected.includes(item.source_url)) })
       Message.success('批量任务已创建并开始执行'); onCreated(); reset()
     } catch (error) { Message.error(error instanceof Error ? error.message : '创建失败') } finally { setLoading(false) }
   }
@@ -363,9 +365,66 @@ function CreateBatchModal({ visible, onClose, onCreated }: { visible: boolean; o
       <Space><Button type="primary" loading={loading} onClick={analyse}>分析视频</Button><Button onClick={reset}>取消</Button></Space>
     </Form> : <>
       <div className="source-list"><Table rowKey="source_url" size="small" data={preview?.items || []} pagination={false} rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys as string[]), checkAll: true }} columns={[{ title: '序号', dataIndex: 'position', width: 72, render: (_: unknown, record: PreviewItem, index: number) => index + 1 }, { title: '视频标题', dataIndex: 'title', ellipsis: true }, { title: '来源', dataIndex: 'platform', width: 110 }]} /></div>
-      <Form form={configForm} layout="vertical" initialValues={{ quality: 'medium', style: 'tutorial', format: ['toc', 'summary'], video_understanding: false, video_interval: 6, grid_size: '2,2' }} style={{ marginTop: 16 }} scrollToFirstError><ModelFields form={configForm} providers={providers} models={models} /><NoteOptions form={configForm} /></Form>
+      <Form form={configForm} layout="vertical" initialValues={{ quality: 'medium', style: 'tutorial', format: ['toc', 'summary'], video_understanding: false, video_interval: 6, grid_size: '2,2' }} style={{ marginTop: 16 }} scrollToFirstError><Form.Item field="task_name" label="任务名称（可选）" rules={[{ type: 'string', maxLength: 100, message: '任务名称不能超过 100 个字符' }]} extra={`不填写时使用“${preview?.title || (sourceType === 'local' ? '本地视频批量任务' : '哔哩哔哩批量任务')}”`}><Input maxLength={100} showWordLimit placeholder="为本次批量任务设置便于识别的名称" /></Form.Item><ModelFields form={configForm} providers={providers} models={models} /><NoteOptions form={configForm} /></Form>
       <Space><Button onClick={() => setStep(0)}>上一步</Button><Button type="primary" loading={loading} onClick={create}>开始批量任务</Button></Space>
     </>}
+  </Modal>
+}
+
+function EditBatchModal({
+  task,
+  onClose,
+  onUpdated,
+}: {
+  task?: BatchTask
+  onClose: () => void
+  onUpdated: (task: BatchTask) => void
+}) {
+  const [form] = Form.useForm()
+  const { providers, models } = useProviders()
+  const [saving, setSaving] = useState(false)
+  const canEditConfig = Boolean(task && ['SUCCESS', 'FAILED', 'PARTIAL_FAILED'].includes(task.status))
+
+  useEffect(() => {
+    if (!task) return
+    form.setFieldsValue({
+      title: task.title,
+      ...(task.config || {}),
+      grid_size: task.config?.grid_size?.join(',') || '2,2',
+    })
+  }, [form, task])
+
+  const save = async () => {
+    if (!task) return
+    try {
+      setSaving(true)
+      const values = await form.validate()
+      const payload: Record<string, unknown> = { title: values.title.trim() }
+      if (canEditConfig) {
+        const { title: _title, ...configValues } = values
+        const config = normaliseOptions(configValues)
+        payload.config = {
+          ...config,
+          link: config.format?.includes('link'),
+          screenshot: config.format?.includes('screenshot'),
+        }
+      }
+      const updated = await api.patch<BatchTask>(`/batch/tasks/${task.id}`, payload)
+      Message.success('批量任务设置已更新')
+      onUpdated(updated)
+      onClose()
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '更新失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return <Modal visible={Boolean(task)} title="编辑批量任务" style={{ width: 760, maxWidth: 'calc(100vw - 32px)' }} confirmLoading={saving} okText="保存修改" maskClosable={false} onOk={() => void save()} onCancel={onClose} unmountOnExit>
+    <Form form={form} layout="vertical" scrollToFirstError>
+      <Form.Item field="title" label="任务名称" rules={[{ required: true, message: '请输入任务名称' }, { type: 'string', maxLength: 100, message: '任务名称不能超过 100 个字符' }]}><Input maxLength={100} showWordLimit /></Form.Item>
+      {canEditConfig ? <><Alert type="info" content="设置修改后将用于后续追加的视频，以及失败子任务的再次重试；已经完成的笔记不会自动重新生成。" style={{ marginBottom: 16 }} /><ModelFields form={form} providers={providers} models={models} /><NoteOptions form={form} /></> : <Alert type="warning" content="任务正在执行，目前只能修改名称；生成设置需在本批任务结束后修改。" />}
+    </Form>
   </Modal>
 }
 
@@ -591,11 +650,13 @@ function BatchDetail({
   task,
   onClose,
   onAppend,
+  onEdit,
   onTaskChange,
 }: {
   task?: BatchTask
   onClose: () => void
   onAppend: (task: BatchTask) => void
+  onEdit: (task: BatchTask) => void
   onTaskChange: (task: BatchTask) => void
 }) {
   const [items, setItems] = useState<BatchItem[]>([])
@@ -637,6 +698,7 @@ function BatchDetail({
       setRetryingId(item.id)
       const updatedItem = await api.post<BatchItem>(`/batch/tasks/${taskId}/items/${item.id}/retry`)
       setItems((current) => current.map((row) => row.id === updatedItem.id ? updatedItem : row))
+      setSelected((current) => current.filter((id) => id !== item.id))
       Message.success('已加入重试队列')
       try {
         await load()
@@ -672,8 +734,77 @@ function BatchDetail({
     }
   }
   const exportItems = async (ids?: string[]) => { try { const blob = await api.download(`/batch/tasks/${task?.id}/export`, ids ? { item_ids: ids } : undefined); downloadBlob(blob, `${task?.title || 'notes'}.zip`) } catch (error) { Message.error(error instanceof Error ? error.message : '导出失败') } }
-  return <><Drawer visible={Boolean(task)} width={980} title={task ? `批量任务：${task.title}` : ''} onCancel={onClose} footer={null}>
-    {task && <Tabs><Tabs.TabPane key="items" title="子任务"><Descriptions column={2} data={[{ label: '整体状态', value: <Status value={task.status} /> }, { label: '总体进度', value: <Progress percent={task.progress} size="small" /> }, { label: '成功 / 失败', value: `${task.completed_count} / ${task.failed_count}` }, { label: '视频总数', value: task.total_count }]} /><div className="toolbar" style={{ margin: '16px 0' }}>{['SUCCESS', 'FAILED', 'PARTIAL_FAILED'].includes(task.status) && <Button type="primary" icon={<IconPlus />} onClick={() => onAppend(task)}>追加视频</Button>}<Button icon={<IconDownload />} onClick={() => void exportItems()}>导出全部</Button><Button disabled={!selected.length} icon={<IconDownload />} onClick={() => void exportItems(selected)}>导出所选</Button></div><Table className="batch-detail-table" rowKey="id" data={items} scroll={{ x: 1080 }} rowSelection={{ selectedRowKeys: selected, onChange: (keys) => setSelected(keys as string[]) }} columns={[{ title: '序号', dataIndex: 'position', width: 64 }, { title: '视频', dataIndex: 'title', width: 240, ellipsis: true }, { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Status value={value} /> }, { title: '日志', dataIndex: 'message', ellipsis: true, render: (value: string, record: BatchItem) => <Tooltip content={value}><Button type="text" size="small" onClick={() => void showEvents(record)}>{value || '查看日志'}</Button></Tooltip> }, { title: '次数', dataIndex: 'attempts', width: 72 }, { title: '操作', width: 224, fixed: 'right', bodyCellStyle: { whiteSpace: 'nowrap' }, render: (_: unknown, record: BatchItem) => <Space className="batch-row-actions" size={4}><Button type="text" size="small" loading={previewLoadingId === record.id} disabled={record.status !== 'SUCCESS'} onClick={() => void showPreview(record)}>阅读</Button><Button type="text" size="small" disabled={record.status !== 'SUCCESS'} onClick={() => void exportItems([record.id])}>导出</Button>{record.status === 'FAILED' && <Button type="text" status="warning" size="small" loading={retryingId === record.id} onClick={() => void retry(record)}>重试</Button>}</Space> }]} /></Tabs.TabPane><Tabs.TabPane key="logs" title="运行日志"><div className="terminal">{events.length ? events.map((event) => `[${event.created_at || '-'}] ${event.status} ${event.message || ''}`).join('\n') : '点击子任务的日志内容查看运行事件。'}</div></Tabs.TabPane></Tabs>
+  const applyDeletion = async (result: { task: BatchTask; deleted_count: number }, deletedIds: string[]) => {
+    setSelected((current) => current.filter((id) => !deletedIds.includes(id)))
+    setPreview((current) => current && deletedIds.includes(current.itemId) ? undefined : current)
+    setEvents([])
+    onTaskChange(result.task)
+    await load()
+    Message.success(`已删除 ${result.deleted_count} 个子任务及相关资源`)
+  }
+  const deleteItem = async (item: BatchItem) => {
+    if (!taskId) return
+    try {
+      const result = await api.delete<{ task: BatchTask; deleted_count: number }>(`/batch/tasks/${taskId}/items/${item.id}`)
+      await applyDeletion(result, [item.id])
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '删除失败')
+      throw error
+    }
+  }
+  const deleteSelected = async () => {
+    if (!taskId || !selected.length) return
+    const ids = [...selected]
+    try {
+      const result = await api.post<{ task: BatchTask; deleted_count: number }>(`/batch/tasks/${taskId}/items/delete`, { item_ids: ids })
+      await applyDeletion(result, ids)
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '批量删除失败')
+      throw error
+    }
+  }
+  return <><Drawer visible={Boolean(task)} width={1080} title={task ? `批量任务：${task.title}` : ''} onCancel={onClose} footer={null}>
+    {task && <Tabs><Tabs.TabPane key="items" title="子任务">
+      <Descriptions column={2} data={[{ label: '整体状态', value: <Status value={task.status} /> }, { label: '总体进度', value: <Progress percent={task.progress} size="small" /> }, { label: '成功 / 失败', value: `${task.completed_count} / ${task.failed_count}` }, { label: '视频总数', value: task.total_count }]} />
+      <div className="toolbar" style={{ margin: '16px 0' }}>
+        <Button icon={<IconEdit />} onClick={() => onEdit(task)}>编辑设置</Button>
+        {['SUCCESS', 'FAILED', 'PARTIAL_FAILED'].includes(task.status) && <Button type="primary" icon={<IconPlus />} onClick={() => onAppend(task)}>追加视频</Button>}
+        <Button icon={<IconDownload />} onClick={() => void exportItems()}>导出全部</Button>
+        <Button disabled={!selected.length} icon={<IconDownload />} onClick={() => void exportItems(selected)}>导出所选</Button>
+        <Popconfirm title={`确认删除选中的 ${selected.length} 个子任务？`} content="对应笔记、缓存、截图和无引用的本地源文件将一并清理，此操作不可恢复。" okText="确认删除" cancelText="取消" okButtonProps={{ status: 'danger' }} disabled={!selected.length} onOk={deleteSelected}>
+          <Button status="danger" icon={<IconDelete />} disabled={!selected.length}>批量删除</Button>
+        </Popconfirm>
+      </div>
+      <Table
+        className="batch-detail-table"
+        rowKey="id"
+        data={items}
+        scroll={{ x: 1180 }}
+        rowSelection={{
+          selectedRowKeys: selected,
+          onChange: (keys) => setSelected(keys as string[]),
+          checkboxProps: (record) => ({ disabled: !['SUCCESS', 'FAILED'].includes(record.status) }),
+        }}
+        columns={[
+          { title: '序号', dataIndex: 'position', width: 64 },
+          { title: '视频', dataIndex: 'title', width: 240, ellipsis: true },
+          { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Status value={value} /> },
+          { title: '日志', dataIndex: 'message', ellipsis: true, render: (value: string, record: BatchItem) => <Tooltip content={value}><Button type="text" size="small" onClick={() => void showEvents(record)}>{value || '查看日志'}</Button></Tooltip> },
+          { title: '次数', dataIndex: 'attempts', width: 72 },
+          { title: '操作', width: 286, fixed: 'right', bodyCellStyle: { whiteSpace: 'nowrap' }, render: (_: unknown, record: BatchItem) => {
+            const canDelete = ['SUCCESS', 'FAILED'].includes(record.status)
+            return <Space className="batch-row-actions" size={4}>
+              <Button type="text" size="small" loading={previewLoadingId === record.id} disabled={record.status !== 'SUCCESS'} onClick={() => void showPreview(record)}>阅读</Button>
+              <Button type="text" size="small" disabled={record.status !== 'SUCCESS'} onClick={() => void exportItems([record.id])}>导出</Button>
+              {record.status === 'FAILED' && <Button type="text" status="warning" size="small" loading={retryingId === record.id} onClick={() => void retry(record)}>重试</Button>}
+              <Tooltip content={canDelete ? '删除子任务及相关资源' : '运行中或排队中的子任务不能删除'}>
+                <span><Popconfirm title="确认删除该子任务？" content="对应笔记、缓存、截图和无引用的本地源文件将一并清理，此操作不可恢复。" okText="确认删除" cancelText="取消" okButtonProps={{ status: 'danger' }} disabled={!canDelete} onOk={() => deleteItem(record)}><Button type="text" status="danger" size="small" disabled={!canDelete}>删除</Button></Popconfirm></span>
+              </Tooltip>
+            </Space>
+          } },
+        ]}
+      />
+    </Tabs.TabPane><Tabs.TabPane key="logs" title="运行日志"><div className="terminal">{events.length ? events.map((event) => `[${event.created_at || '-'}] ${event.status} ${event.message || ''}`).join('\n') : '点击子任务的日志内容查看运行事件。'}</div></Tabs.TabPane></Tabs>
     }</Drawer>
     <Drawer
       className="markdown-reader-drawer"
@@ -702,6 +833,7 @@ function BatchTaskPage() {
   const [createVisible, setCreateVisible] = useState(false)
   const [active, setActive] = useState<BatchTask>()
   const [appendTarget, setAppendTarget] = useState<BatchTask>()
+  const [editTarget, setEditTarget] = useState<BatchTask>()
   const loadRequestRef = useRef(0)
   const load = useCallback(async () => {
     const requestId = ++loadRequestRef.current
@@ -721,6 +853,13 @@ function BatchTaskPage() {
     setTasks((current) => current.map((item) => item.id === updated.id ? updated : item))
     setActive((current) => current?.id === updated.id ? updated : current)
   }, [])
+  const openEdit = useCallback(async (task: BatchTask) => {
+    try {
+      setEditTarget(await api.get<BatchTask>(`/batch/tasks/${task.id}`))
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : '加载任务设置失败')
+    }
+  }, [])
   useEffect(() => { void load() }, [load])
   const hasActiveTasks = tasks.some((item) => ['PENDING', 'RUNNING'].includes(item.status))
   useEffect(() => {
@@ -729,7 +868,7 @@ function BatchTaskPage() {
     return () => window.clearInterval(timer)
   }, [hasActiveTasks, load])
   const stats = useMemo(() => ({ running: tasks.filter((item) => item.status === 'RUNNING').length, complete: tasks.filter((item) => item.status === 'SUCCESS').length, failed: tasks.filter((item) => ['FAILED', 'PARTIAL_FAILED'].includes(item.status)).length }), [tasks])
-  return <div className="page"><PageHeader title="批量合集任务" description="解析哔哩哔哩公开视频合集或上传本地文件夹，持续生成可导出的课程笔记。" actions={<><Button icon={<IconRefresh />} onClick={() => void load()}>刷新</Button><Button type="primary" icon={<IconPlus />} onClick={() => setCreateVisible(true)}>新建批量任务</Button></>} /><div className="stats"><div className="stat"><div className="stat-value">{tasks.length}</div><div className="stat-label">批量任务</div></div><div className="stat"><div className="stat-value">{stats.running}</div><div className="stat-label">正在运行</div></div><div className="stat"><div className="stat-value">{stats.complete}</div><div className="stat-label">已全部完成</div></div><div className="stat"><div className="stat-value">{stats.failed}</div><div className="stat-label">需要处理</div></div></div><Card><Table rowKey="id" loading={loading} data={tasks} scroll={{ x: 1120 }} onRow={(record) => ({ onClick: () => setActive(record) })} columns={[{ title: '任务名称', dataIndex: 'title', width: 260, ellipsis: true }, { title: '来源', dataIndex: 'source_type', width: 110 }, { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Status value={value} /> }, { title: '进度', width: 220, render: (_: unknown, record: BatchTask) => <Progress percent={record.progress} size="small" /> }, { title: '完成 / 失败 / 总计', width: 160, render: (_: unknown, record: BatchTask) => `${record.completed_count} / ${record.failed_count} / ${record.total_count}` }, { title: '创建时间', dataIndex: 'created_at', width: 180, render: (value: string) => value ? new Date(value).toLocaleString() : '-' }, { title: '操作', width: 150, fixed: 'right', render: (_: unknown, record: BatchTask) => <Space><Button type="text" size="small" onClick={(event) => { event.stopPropagation(); setActive(record) }}>查看</Button>{['SUCCESS', 'FAILED', 'PARTIAL_FAILED'].includes(record.status) && <Button type="text" size="small" icon={<IconPlus />} onClick={(event) => { event.stopPropagation(); setAppendTarget(record) }}>追加</Button>}</Space> }]} /></Card><CreateBatchModal visible={createVisible} onClose={() => setCreateVisible(false)} onCreated={load} /><AppendBatchModal task={appendTarget} visible={Boolean(appendTarget)} onClose={() => setAppendTarget(undefined)} onAppended={(updated) => { handleTaskChange(updated); void load() }} /><BatchDetail task={active} onClose={() => setActive(undefined)} onAppend={setAppendTarget} onTaskChange={handleTaskChange} /></div>
+  return <div className="page"><PageHeader title="批量合集任务" description="解析哔哩哔哩公开视频合集或上传本地文件夹，持续生成可导出的课程笔记。" actions={<><Button icon={<IconRefresh />} onClick={() => void load()}>刷新</Button><Button type="primary" icon={<IconPlus />} onClick={() => setCreateVisible(true)}>新建批量任务</Button></>} /><div className="stats"><div className="stat"><div className="stat-value">{tasks.length}</div><div className="stat-label">批量任务</div></div><div className="stat"><div className="stat-value">{stats.running}</div><div className="stat-label">正在运行</div></div><div className="stat"><div className="stat-value">{stats.complete}</div><div className="stat-label">已全部完成</div></div><div className="stat"><div className="stat-value">{stats.failed}</div><div className="stat-label">需要处理</div></div></div><Card><Table rowKey="id" loading={loading} data={tasks} scroll={{ x: 1200 }} onRow={(record) => ({ onClick: () => setActive(record) })} columns={[{ title: '任务名称', dataIndex: 'title', width: 260, ellipsis: true }, { title: '来源', dataIndex: 'source_type', width: 110 }, { title: '状态', dataIndex: 'status', width: 130, render: (value: string) => <Status value={value} /> }, { title: '进度', width: 220, render: (_: unknown, record: BatchTask) => <Progress percent={record.progress} size="small" /> }, { title: '完成 / 失败 / 总计', width: 160, render: (_: unknown, record: BatchTask) => `${record.completed_count} / ${record.failed_count} / ${record.total_count}` }, { title: '创建时间', dataIndex: 'created_at', width: 180, render: (value: string) => value ? new Date(value).toLocaleString() : '-' }, { title: '操作', width: 230, fixed: 'right', render: (_: unknown, record: BatchTask) => <Space><Button type="text" size="small" onClick={(event) => { event.stopPropagation(); setActive(record) }}>查看</Button><Button type="text" size="small" icon={<IconEdit />} onClick={(event) => { event.stopPropagation(); void openEdit(record) }}>编辑</Button>{['SUCCESS', 'FAILED', 'PARTIAL_FAILED'].includes(record.status) && <Button type="text" size="small" icon={<IconPlus />} onClick={(event) => { event.stopPropagation(); setAppendTarget(record) }}>追加</Button>}</Space> }]} /></Card><CreateBatchModal visible={createVisible} onClose={() => setCreateVisible(false)} onCreated={load} /><AppendBatchModal task={appendTarget} visible={Boolean(appendTarget)} onClose={() => setAppendTarget(undefined)} onAppended={(updated) => { handleTaskChange(updated); void load() }} /><EditBatchModal task={editTarget} onClose={() => setEditTarget(undefined)} onUpdated={(updated) => { handleTaskChange(updated); setEditTarget(undefined); void load() }} /><BatchDetail task={active} onClose={() => setActive(undefined)} onAppend={setAppendTarget} onEdit={(task) => void openEdit(task)} onTaskChange={handleTaskChange} /></div>
 }
 
 function ModelSettings() {

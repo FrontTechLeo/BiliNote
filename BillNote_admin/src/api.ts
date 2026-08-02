@@ -17,6 +17,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, data?: unknown) => request<T>(path, { method: 'POST', body: JSON.stringify(data) }),
+  patch: <T>(path: string, data?: unknown) => request<T>(path, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
   upload: <T>(path: string, data: FormData) => request<T>(path, { method: 'POST', body: data }),
   uploadWithProgress: <T>(
     path: string,
