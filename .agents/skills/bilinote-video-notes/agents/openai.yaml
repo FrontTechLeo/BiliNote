@@ -1,0 +1,6 @@
+interface:
+  display_name: "BiliNote Video Notes"
+  short_description: "Turn local videos into image-rich Markdown notes"
+  default_prompt: "Use $bilinote-video-notes to turn local video files into BiliNote-style Markdown notes."
+policy:
+  allow_implicit_invocation: true

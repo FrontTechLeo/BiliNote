@@ -327,3 +327,4 @@ cython_debug/
 # FFmpeg 构建文件（不应该提交到仓库）
 ffmpeg*/
 ffmpg*/
+/.bilinote-video-notes/
