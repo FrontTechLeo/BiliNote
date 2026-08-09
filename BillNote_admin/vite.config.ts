@@ -5,7 +5,8 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '..')
   const backend = env.VITE_API_BASE_URL || 'http://127.0.0.1:8483'
   return {
-    base: '/admin/',
+    // The same SPA is served by nginx for both /admin/ and the standalone /mobile entry.
+    base: '/',
     plugins: [react()],
     build: { outDir: 'build' },
     server: {
