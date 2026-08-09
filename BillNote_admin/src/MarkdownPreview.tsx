@@ -524,7 +524,6 @@ export default function MarkdownPreview({
                     <Image
                       src={resolveAssetUrl(block.src)}
                       alt={block.alt || '视频关键画面'}
-                      width="100%"
                       lazyload
                       title={block.alt || undefined}
                     />

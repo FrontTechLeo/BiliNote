@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "lint": "eslint src --ext ts,tsx"
+    "lint": "eslint src --ext ts,tsx",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@arco-design/web-react": "^2.66.0",

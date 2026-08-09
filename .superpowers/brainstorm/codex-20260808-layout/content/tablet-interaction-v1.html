@@ -1,0 +1,64 @@
+<style>
+  .visual-question { margin-bottom: 22px; }
+  .visual-question h2 { margin-bottom: 8px; }
+  .visual-question p { max-width: 780px; }
+  .layout-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .layout-option { cursor: pointer; }
+  .layout-option .card-body { padding: 14px 16px 16px; }
+  .tablet-stage { min-height: 275px; padding: 20px; background: linear-gradient(135deg, #f7f4ee, #eef3f2); }
+  .tablet-shell { height: 225px; border-radius: 15px; overflow: hidden; background: #fbfcfa; border: 1px solid #d6ddd9; box-shadow: 0 12px 26px rgba(40, 55, 50, .12); color: #1f2b28; }
+  .tablet-top { height: 22px; display: flex; align-items: center; gap: 5px; padding: 0 10px; background: #183c36; color: #eaf6ef; font-size: 8px; }
+  .tablet-top i { width: 5px; height: 5px; border-radius: 50%; background: #9cceb2; }
+  .tablet-main { display: grid; height: calc(100% - 22px); }
+  .three .tablet-main { grid-template-columns: 42px 132px 1fr; }
+  .two .tablet-main { grid-template-columns: 42px 1fr; }
+  .rail { background: #eef4ef; border-right: 1px solid #dce8df; padding: 10px 5px; display: flex; flex-direction: column; gap: 9px; }
+  .rail b { width: 24px; height: 24px; margin: 0 auto; border-radius: 8px; background: #d8e8dd; }
+  .rail b.active { background: #26724f; }
+  .list { padding: 12px 9px; border-right: 1px solid #e1e8e2; background: #fff; }
+  .list h4, .reader h4 { margin: 0 0 7px; font-size: 11px; }
+  .list small, .reader small { display: block; color: #7b8982; font-size: 8px; margin-bottom: 8px; }
+  .list-item { height: 24px; border-radius: 6px; background: #f1f5f1; margin: 6px 0; }
+  .list-item.active { background: #d8eadb; border-left: 3px solid #26724f; }
+  .reader { padding: 12px 15px; }
+  .reader .title-line { height: 14px; width: 62%; border-radius: 4px; background: #93c6a4; margin-bottom: 9px; }
+  .reader .line { height: 6px; border-radius: 4px; background: #dfe7e2; margin: 6px 0; }
+  .reader .line.short { width: 56%; }
+  .reader .image { height: 45px; width: 76%; border-radius: 8px; background: #d7eadc; margin: 10px 0; }
+  .two .reader { padding: 17px 34px; max-width: 420px; }
+  .two .reader:before { content: '‹ 返回笔记库'; display: block; color: #397456; font-size: 9px; margin-bottom: 12px; }
+  .tag { display: inline-block; margin-top: 11px; padding: 5px 8px; border-radius: 999px; background: #edf5ee; color: #397456; font-size: 8px; }
+  @media (max-width: 760px) { .layout-grid { grid-template-columns: 1fr; } }
+</style>
+
+<div class="visual-question">
+  <h2>平板横屏下，阅读器如何利用大屏？</h2>
+  <p class="subtitle">基于已选的 A 方案，请选择合集详情和笔记阅读的平板交互密度。推荐使用“宽屏三栏、窄屏两栏”的自适应策略。</p>
+</div>
+
+<div class="cards layout-grid">
+  <div class="card layout-option" data-choice="hybrid-three-column" onclick="toggleSelect(this)">
+    <div class="card-image tablet-stage">
+      <div class="tablet-shell three">
+        <div class="tablet-top"><i></i><i></i> BiliNote · 合集详情</div>
+        <div class="tablet-main"><div class="rail"><b></b><b class="active"></b><b></b><b></b></div><div class="list"><h4>视频列表</h4><small>12 个视频 · 处理中</small><div class="list-item active"></div><div class="list-item"></div><div class="list-item"></div><div class="list-item"></div><div class="list-item"></div></div><div class="reader"><h4>第 03 集：AI 工作流</h4><small>已完成 · 预计阅读 6 分钟</small><div class="title-line"></div><div class="line"></div><div class="line short"></div><div class="image"></div><div class="line"></div><div class="line short"></div></div></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>A · 宽屏三栏 / 窄屏两栏（推荐）</h3><p>展开宽度下同时保留导航、视频列表和阅读内容；中等宽度隐藏列表或改为抽屉，阅读区域始终保持舒适宽度。</p></div>
+  </div>
+
+  <div class="card layout-option" data-choice="simple-two-column" onclick="toggleSelect(this)">
+    <div class="card-image tablet-stage">
+      <div class="tablet-shell two">
+        <div class="tablet-top"><i></i><i></i> BiliNote · 笔记阅读</div>
+        <div class="tablet-main"><div class="rail"><b></b><b class="active"></b><b></b><b></b></div><div class="reader"><h4>第 03 集：AI 工作流</h4><small>沉浸式阅读模式</small><div class="title-line"></div><div class="line"></div><div class="line short"></div><div class="image"></div><div class="line"></div><div class="line"></div><span class="tag">目录 · 来源 · 导出</span></div></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>B · 导航栏 + 单列阅读</h3><p>所有平板尺寸都保持导航栏与单列正文，交互更简单，但合集管理需要频繁返回列表，横屏空间利用率较低。</p></div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>建议的尺寸规则</h3>
+  <div class="pros-cons"><div class="pros"><h4>Expanded / 横屏大平板</h4><ul><li>导航栏 72dp</li><li>视频列表 280–340dp</li><li>正文最大宽度 720dp</li></ul></div><div class="cons"><h4>Medium / 竖屏或小平板</h4><ul><li>保留导航栏</li><li>列表改为抽屉或顶部筛选</li><li>阅读器单列展示</li></ul></div></div>
+</div>

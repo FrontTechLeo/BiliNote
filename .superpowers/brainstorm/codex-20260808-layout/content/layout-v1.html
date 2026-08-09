@@ -1,0 +1,94 @@
+<style>
+  .visual-question { margin-bottom: 22px; }
+  .visual-question h2 { margin-bottom: 8px; }
+  .visual-question p { max-width: 760px; }
+  .layout-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .layout-option { cursor: pointer; }
+  .layout-option .card-body { padding: 14px 16px 16px; }
+  .device-row { display: flex; gap: 14px; align-items: flex-end; justify-content: center; min-height: 390px; padding: 24px 14px 18px; background: linear-gradient(135deg, #f7f4ee, #eef3f2); }
+  .device { background: #fff; border: 1px solid #d6ddd9; box-shadow: 0 12px 26px rgba(40, 55, 50, .12); overflow: hidden; color: #1f2b28; }
+  .phone { width: 145px; height: 300px; border-radius: 22px; }
+  .tablet { width: 270px; height: 210px; border-radius: 15px; }
+  .device-top { height: 20px; display: flex; align-items: center; gap: 5px; padding: 0 9px; background: #183c36; color: #eaf6ef; font-size: 8px; }
+  .device-top i { width: 5px; height: 5px; border-radius: 50%; background: #9cceb2; }
+  .device-body { display: grid; grid-template-columns: 1fr; height: calc(100% - 20px); background: #fbfcfa; }
+  .tablet .device-body { grid-template-columns: 42px 1fr; }
+  .rail { background: #eef4ef; border-right: 1px solid #dce8df; padding: 10px 5px; display: flex; flex-direction: column; gap: 9px; }
+  .rail b { width: 24px; height: 24px; margin: 0 auto; border-radius: 8px; background: #d8e8dd; }
+  .rail b.active { background: #26724f; }
+  .screen { padding: 12px; min-width: 0; }
+  .screen h4 { margin: 0 0 8px; font-size: 12px; }
+  .screen small { display: block; color: #7b8982; font-size: 8px; margin-bottom: 10px; }
+  .hero { height: 38px; border-radius: 9px; background: #d7eadc; margin-bottom: 9px; }
+  .line { height: 7px; border-radius: 4px; background: #dfe7e2; margin: 7px 0; }
+  .line.short { width: 58%; }
+  .line.green { background: #94c7a7; width: 72%; }
+  .card-line { display: flex; gap: 6px; align-items: center; padding: 7px; border: 1px solid #e1e8e2; border-radius: 8px; margin-top: 7px; background: #fff; }
+  .thumb { width: 23px; height: 23px; border-radius: 6px; background: #e0eee5; }
+  .card-line div { flex: 1; }
+  .bottom-nav { display: flex; justify-content: space-around; padding: 8px 3px 6px; border-top: 1px solid #e1e8e2; font-size: 7px; color: #76837d; }
+  .bottom-nav b { color: #26724f; }
+  .split-content { display: grid; grid-template-columns: 78px 1fr; gap: 8px; height: 112px; }
+  .list { border-right: 1px solid #e1e8e2; padding-right: 7px; }
+  .list .line { height: 18px; margin: 4px 0; }
+  .reader { padding-left: 3px; }
+  .reader .hero { height: 24px; }
+  .reader .line { height: 5px; margin: 4px 0; }
+  .flow { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-top: 18px; color: #52625a; font-size: 12px; }
+  .flow span { padding: 6px 9px; border-radius: 999px; background: #edf5ee; border: 1px solid #d5e5d7; }
+  .flow i { color: #80a58b; font-style: normal; }
+  @media (max-width: 760px) { .layout-grid { grid-template-columns: 1fr; } }
+</style>
+
+<div class="visual-question">
+  <h2>手机与平板如何共享一套交互？</h2>
+  <p class="subtitle">请选择更符合 BiliNote 原生 Android 方向的响应式结构。两种方案都支持手机和平板，差别在于平板是否真正利用大屏空间。</p>
+</div>
+
+<div class="cards layout-grid">
+  <div class="card layout-option" data-choice="adaptive" onclick="toggleSelect(this)">
+    <div class="card-image device-row">
+      <div class="device phone">
+        <div class="device-top"><i></i><i></i> BiliNote</div>
+        <div class="device-body">
+          <div class="screen">
+            <h4>把视频变成知识</h4><small>最近生成 · 笔记库</small>
+            <div class="hero"></div><div class="line green"></div><div class="line short"></div>
+            <div class="card-line"><span class="thumb"></span><div><div class="line green"></div><div class="line short"></div></div></div>
+            <div class="card-line"><span class="thumb"></span><div><div class="line"></div><div class="line short"></div></div></div>
+          </div>
+          <div class="bottom-nav"><b>首页</b><span>合集</span><span>笔记库</span></div>
+        </div>
+      </div>
+      <div class="device tablet">
+        <div class="device-top"><i></i><i></i> BiliNote · 平板</div>
+        <div class="device-body">
+          <div class="rail"><b class="active"></b><b></b><b></b><b></b></div>
+          <div class="screen"><h4>笔记库</h4><small>左侧导航固定，内容按空间展开</small>
+            <div class="split-content"><div class="list"><div class="line green"></div><div class="line"></div><div class="line"></div><div class="line short"></div></div><div class="reader"><div class="hero"></div><div class="line green"></div><div class="line"></div><div class="line"></div><div class="line short"></div></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body"><h3>A · 自适应双形态（推荐）</h3><p>手机保留底部导航；平板切换为导航栏和列表/详情双栏。阅读笔记时可边看目录边阅读。</p></div>
+  </div>
+
+  <div class="card layout-option" data-choice="scaled" onclick="toggleSelect(this)">
+    <div class="card-image device-row">
+      <div class="device phone">
+        <div class="device-top"><i></i><i></i> BiliNote</div>
+        <div class="device-body"><div class="screen"><h4>把视频变成知识</h4><small>所有设备保持相同层级</small><div class="hero"></div><div class="line green"></div><div class="line short"></div><div class="card-line"><span class="thumb"></span><div><div class="line green"></div><div class="line short"></div></div></div></div><div class="bottom-nav"><b>首页</b><span>合集</span><span>笔记库</span></div></div>
+      </div>
+      <div class="device tablet">
+        <div class="device-top"><i></i><i></i> BiliNote · 平板</div>
+        <div class="device-body"><div class="screen"><h4>笔记库</h4><small>与手机保持相同交互</small><div class="hero"></div><div class="line green"></div><div class="line short"></div><div class="card-line"><span class="thumb"></span><div><div class="line"></div><div class="line short"></div></div></div><div class="bottom-nav"><b>首页</b><span>合集</span><span>笔记库</span></div></div></div>
+      </div>
+    </div>
+    <div class="card-body"><h3>B · 统一单列布局</h3><p>手机和平板使用同一套底部导航与单列页面，开发成本更低，但平板会留下较多空白，阅读和管理效率较弱。</p></div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>推荐方案的核心交互流</h3>
+  <div class="flow"><span>首页创建任务</span><i>→</i><span>任务进度卡片</span><i>→</i><span>笔记库/合集详情</span><i>→</i><span>双栏阅读器</span><i>→</i><span>导出或继续阅读</span></div>
+</div>

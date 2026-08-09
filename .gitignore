@@ -328,3 +328,13 @@ cython_debug/
 ffmpeg*/
 ffmpg*/
 /.bilinote-video-notes/
+
+# Android/Gradle 构建产物
+/android/.gradle/
+/android/.kotlin/
+/android/.wrapper-generator/
+/android/**/build/
+/android/**/.cxx/
+/android/**/.externalNativeBuild/
+/android/**/captures/
+/android/local.properties
