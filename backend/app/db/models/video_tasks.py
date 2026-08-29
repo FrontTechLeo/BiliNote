@@ -26,6 +26,7 @@ class BatchTask(Base):
     total_count = Column(Integer, nullable=False, default=0)
     completed_count = Column(Integer, nullable=False, default=0)
     failed_count = Column(Integer, nullable=False, default=0)
+    canceled_count = Column(Integer, nullable=False, default=0)
     running_count = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime, server_default=func.now())
     started_at = Column(DateTime, nullable=True)

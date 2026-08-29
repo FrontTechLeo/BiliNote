@@ -6,6 +6,7 @@ import sys
 import tempfile
 import types
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -119,7 +120,46 @@ class _DummyClient:
         self.models = _DummyModels()
 
 
+class _MalformedThenSuccessfulCompletions:
+    def __init__(self):
+        self.calls = 0
+
+    def create(self, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise json.JSONDecodeError("Expecting value", "<html>gateway error</html>", 0)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+
+
+class _MalformedThenSuccessfulClient:
+    def __init__(self):
+        self.chat = _DummyChat()
+        self.chat.completions = _MalformedThenSuccessfulCompletions()
+        self.models = _DummyModels()
+
+
 class TestUniversalGPTCheckpoint(unittest.TestCase):
+    def test_json_decode_error_is_logged_and_retried(self):
+        original_backoff = os.environ.get("OPENAI_RETRY_BACKOFF_SECONDS")
+        os.environ["OPENAI_RETRY_BACKOFF_SECONDS"] = "0"
+        client = _MalformedThenSuccessfulClient()
+        gpt = UniversalGPT(client, model="mock-model")
+        try:
+            with self.assertLogs("universal_gpt", level="WARNING") as logs:
+                response = gpt._chat_completion_create([{"role": "user", "content": "prompt"}])
+
+            self.assertEqual(response.choices[0].message.content, "ok")
+            self.assertEqual(client.chat.completions.calls, 2)
+            self.assertIn("attempt 1/3; retrying=True", logs.output[0])
+            self.assertIn("Expecting value", logs.output[0])
+        finally:
+            if original_backoff is None:
+                os.environ.pop("OPENAI_RETRY_BACKOFF_SECONDS", None)
+            else:
+                os.environ["OPENAI_RETRY_BACKOFF_SECONDS"] = original_backoff
+
     def test_merge_524_error_persists_checkpoint(self):
         original_attempts = os.environ.get("OPENAI_RETRY_ATTEMPTS")
         os.environ["OPENAI_RETRY_ATTEMPTS"] = "1"

@@ -5,6 +5,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.kotlinx.serialization.asConverterFactory
+import java.net.URI
 
 object NetworkModule {
     val json = Json {
@@ -29,9 +30,15 @@ object NetworkModule {
     }
 
     fun createRetrofit(baseUrl: String, token: String? = null): Retrofit {
-        val normalizedBaseUrl = "${BackendUrl.normalize(baseUrl)}/"
+        val normalizedBaseUrl = BackendUrl.normalize(baseUrl)
+        val path = URI(normalizedBaseUrl).path
+        val apiBaseUrl = if (path.isNullOrEmpty() || path == "/") {
+            "$normalizedBaseUrl/api"
+        } else {
+            normalizedBaseUrl
+        }
         return Retrofit.Builder()
-            .baseUrl(normalizedBaseUrl)
+            .baseUrl("$apiBaseUrl/")
             .client(createClient(token))
             .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
             .build()

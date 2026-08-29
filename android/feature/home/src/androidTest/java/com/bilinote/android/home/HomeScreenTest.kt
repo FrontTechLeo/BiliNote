@@ -88,6 +88,10 @@ class HomeScreenTest {
         composeRule.onNodeWithText("视频理解").assertExists()
         composeRule.onNodeWithText("视频间隔").assertExists()
         composeRule.onNodeWithText("网格尺寸").assertExists()
+        composeRule.onNodeWithText("图片压缩级别").assertExists()
+        composeRule.onNodeWithText("高压缩（JPEG/720p）").assertExists()
+        composeRule.onNodeWithText("中等（JPEG）").assertExists()
+        composeRule.onNodeWithText("原图（PNG）").assertExists()
         composeRule.onNodeWithText("输出格式").assertExists()
         composeRule.onNodeWithText("额外要求").assertExists()
     }

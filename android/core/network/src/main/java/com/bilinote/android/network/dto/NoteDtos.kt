@@ -20,6 +20,7 @@ data class GenerateNoteRequest(
     @SerialName("video_understanding") val videoUnderstanding: Boolean? = null,
     @SerialName("video_interval") val videoInterval: Int? = null,
     @SerialName("grid_size") val gridSize: List<Int>? = null,
+    @SerialName("image_compression") val imageCompression: String = "high",
     @SerialName("prefetched_transcript") val prefetchedTranscript: PrefetchedTranscriptDto? = null,
 )
 

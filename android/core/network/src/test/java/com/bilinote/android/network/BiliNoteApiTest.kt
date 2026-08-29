@@ -1,6 +1,9 @@
 package com.bilinote.android.network
 
+import com.bilinote.android.network.dto.GenerateNoteRequest
+import com.bilinote.android.network.dto.BatchConfig
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.encodeToString
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -23,7 +26,13 @@ class BiliNoteApiTest {
     @Test fun `decodes successful response`() = runTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"code\":0,\"msg\":\"ok\",\"data\":{\"task_id\":\"t1\",\"status\":\"PENDING\"}}"))
         assertEquals("PENDING", api.taskStatus("t1").status)
-        assertEquals("/task_status/t1", server.takeRequest().path)
+        assertEquals("/api/task_status/t1", server.takeRequest().path)
+    }
+
+    @Test fun `adds api prefix when configured with backend root address`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("{\"code\":0,\"msg\":\"ok\",\"data\":{\"task_id\":\"t1\",\"status\":\"PENDING\"}}"))
+        createApi(baseUrl = server.url("/")).taskStatus("t1")
+        assertEquals("/api/task_status/t1", server.takeRequest().path)
     }
 
     @Test fun `maps business error`() = runTest {
@@ -72,6 +81,23 @@ class BiliNoteApiTest {
     @Test fun `decodes numeric batch event ids`() = runTest {
         server.enqueue(MockResponse().setBody("{\"code\":0,\"msg\":\"ok\",\"data\":[{\"id\":7,\"status\":\"SUCCESS\"}]}"))
         assertEquals(7, createApi().batchEvents("b1", "i1").single().id)
+    }
+
+    @Test fun `serializes image compression with backend field name`() {
+        val noteBody = NetworkModule.json.encodeToString(
+            GenerateNoteRequest(
+                videoUrl = "https://example.com/video",
+                platform = "bilibili",
+                quality = "medium",
+                modelName = "model-1",
+                providerId = "provider-1",
+                imageCompression = "medium",
+            ),
+        )
+        val batchBody = NetworkModule.json.encodeToString(BatchConfig(imageCompression = "original"))
+
+        assertTrue(noteBody.contains("\"image_compression\":\"medium\""))
+        assertTrue(batchBody.contains("\"image_compression\":\"original\""))
     }
 
     private fun createApi(

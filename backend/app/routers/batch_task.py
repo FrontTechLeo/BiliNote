@@ -1,10 +1,11 @@
 from typing import Any, Optional
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.services.batch_task_service import batch_task_service
 from app.utils.response import ResponseWrapper as R
+from app.utils.video_reader import DEFAULT_IMAGE_COMPRESSION, normalize_image_compression
 
 router = APIRouter()
 
@@ -31,6 +32,12 @@ class BatchConfig(BaseModel):
     video_understanding: bool = False
     video_interval: int = 6
     grid_size: list[int] = Field(default_factory=lambda: [2, 2])
+    image_compression: str = DEFAULT_IMAGE_COMPRESSION
+
+    @field_validator("image_compression")
+    @classmethod
+    def validate_image_compression(cls, value: str) -> str:
+        return normalize_image_compression(value)
 
 
 class BatchCreateRequest(BaseModel):
@@ -159,6 +166,16 @@ def list_batch_item_events(batch_id: str, item_id: str):
 def retry_batch_item(batch_id: str, item_id: str):
     try:
         return R.success(batch_task_service.retry_item(batch_id, item_id))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
+@router.post("/batch/tasks/{batch_id}/items/{item_id}/cancel")
+def cancel_batch_item(batch_id: str, item_id: str):
+    try:
+        return R.success(batch_task_service.cancel_item(batch_id, item_id))
     except KeyError as exc:
         return R.error(msg=str(exc), code=404)
     except ValueError as exc:

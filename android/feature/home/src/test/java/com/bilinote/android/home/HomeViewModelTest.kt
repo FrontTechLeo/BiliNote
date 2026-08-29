@@ -75,6 +75,18 @@ class HomeViewModelTest {
         assertEquals(false, request.videoUnderstanding)
         assertEquals(6, request.videoInterval)
         assertEquals(listOf(2, 2), request.gridSize)
+        assertEquals("high", request.imageCompression)
+    }
+
+    @Test
+    fun imageCompressionIsForwardedWithGenerateRequest() = runTest {
+        val repository = FakeHomeRepository()
+        val viewModel = HomeViewModel(repository = repository, scope = createViewModelScope())
+
+        viewModel.submit(defaultDraft().copy(imageCompression = "original"))
+        advanceUntilIdle()
+
+        assertEquals("original", repository.generatedRequests.single().imageCompression)
     }
 
     @Test

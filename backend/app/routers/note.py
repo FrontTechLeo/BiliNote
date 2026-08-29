@@ -22,8 +22,10 @@ from app.exceptions.note import NoteError
 from app.services.note import NoteGenerator, logger
 from app.services.task_serial_executor import task_serial_executor
 from app.services.single_task_history_service import single_task_history_service
+from app.services.task_cancellation import task_cancellation_registry
 from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id
+from app.utils.video_reader import DEFAULT_IMAGE_COMPRESSION, normalize_image_compression
 from app.validators.video_url_validator import is_supported_video_url
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse, Response, FileResponse
@@ -56,6 +58,7 @@ class VideoRequest(BaseModel):
     video_understanding: Optional[bool] = False
     video_interval: Optional[int] = 0
     grid_size: Optional[list] = []
+    image_compression: str = DEFAULT_IMAGE_COMPRESSION
     # 客户端（如浏览器插件）已经在用户浏览器里抓到字幕，直接传给后端复用，
     # 跳过 download_subtitles 和音频转写。形如：
     #   {"language": "zh", "full_text": "...", "segments": [{"start","end","text"}, ...]}
@@ -72,6 +75,11 @@ class VideoRequest(BaseModel):
                                 message=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.message)
 
         return v
+
+    @field_validator("image_compression")
+    @classmethod
+    def validate_image_compression(cls, v):
+        return normalize_image_compression(v)
 
 
 NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
@@ -121,44 +129,59 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-                  video_interval=0, grid_size=[]
+                  video_interval=0, grid_size=[], image_compression: str = DEFAULT_IMAGE_COMPRESSION,
                   ):
 
     if not model_name or not provider_id:
         raise HTTPException(status_code=400, detail="请选择模型和提供者")
 
-    def _execute_note_task():
-        return NoteGenerator().generate(
-            video_url=video_url,
-            platform=platform,
-            quality=quality,
-            task_id=task_id,
-            model_name=model_name,
-            provider_id=provider_id,
-            link=link,
-            _format=_format,
-            style=style,
-            extras=extras,
-            screenshot=screenshot,
-            video_understanding=video_understanding,
-            video_interval=video_interval,
-            grid_size=grid_size,
-        )
-
-    logger.info(f"任务进入执行队列 (task_id={task_id})")
-    note = task_serial_executor.run(_execute_note_task)
-    logger.info(f"Note generated: {task_id}")
-    if not note or not note.markdown:
-        logger.warning(f"任务 {task_id} 执行失败，跳过保存")
-        return
-    save_note_to_file(task_id, note)
-
-    # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
+    cancel_event = task_cancellation_registry.register(task_id)
     try:
-        from app.services.vector_store import VectorStoreManager
-        VectorStoreManager().index_task(task_id)
-    except Exception as e:
-        logger.warning(f"向量索引失败（不影响笔记）: {e}")
+        def cancel_check() -> bool:
+            return cancel_event.is_set()
+
+        def _execute_note_task():
+            return NoteGenerator().generate(
+                video_url=video_url,
+                platform=platform,
+                quality=quality,
+                task_id=task_id,
+                model_name=model_name,
+                provider_id=provider_id,
+                link=link,
+                _format=_format,
+                style=style,
+                extras=extras,
+                screenshot=screenshot,
+                video_understanding=video_understanding,
+                video_interval=video_interval,
+                grid_size=grid_size,
+                image_compression=image_compression,
+                cancel_check=cancel_check,
+            )
+
+        logger.info(f"任务进入执行队列 (task_id={task_id})")
+        if cancel_check():
+            NoteGenerator()._update_status(task_id, TaskStatus.CANCELED, "用户已取消任务")
+            return
+        note = task_serial_executor.run(_execute_note_task)
+        logger.info(f"Note generated: {task_id}")
+        if cancel_check():
+            NoteGenerator()._update_status(task_id, TaskStatus.CANCELED, "用户已取消任务")
+            return
+        if not note or not note.markdown:
+            logger.warning(f"任务 {task_id} 执行失败，跳过保存")
+            return
+        save_note_to_file(task_id, note)
+
+        # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
+        try:
+            from app.services.vector_store import VectorStoreManager
+            VectorStoreManager().index_task(task_id)
+        except Exception as e:
+            logger.warning(f"向量索引失败（不影响笔记）: {e}")
+    finally:
+        task_cancellation_registry.release(task_id)
 
 
 @router.post('/delete_task')
@@ -239,7 +262,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 
         background_tasks.add_task(run_note_task, task_id, data.video_url, data.platform, data.quality, data.link,
                                   data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                                  data.extras, data.video_understanding, data.video_interval, data.grid_size)
+                                  data.extras, data.video_understanding, data.video_interval, data.grid_size,
+                                  data.image_compression)
         return R.success({"task_id": task_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -248,6 +272,39 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 @router.get("/single/tasks")
 def list_single_tasks(page: int = 1, page_size: int = 20):
     return R.success(single_task_history_service.list_tasks(page, page_size))
+
+
+@router.post("/single/tasks/{task_id}/cancel")
+def cancel_single_task(task_id: str):
+    if not re.fullmatch(r"^[A-Za-z0-9-]+$", task_id):
+        return R.error(msg="任务不存在", code=404)
+    request_data = single_task_history_service.get_request(task_id)
+    status_path = Path(NOTE_OUTPUT_DIR) / f"{task_id}.status.json"
+    result_path = Path(NOTE_OUTPUT_DIR) / f"{task_id}.json"
+    if not request_data and not status_path.exists() and not result_path.exists():
+        return R.error(msg="任务不存在", code=404)
+
+    status = TaskStatus.PENDING.value
+    if status_path.exists():
+        try:
+            status = str(json.loads(status_path.read_text(encoding="utf-8")).get("status") or status)
+        except (OSError, ValueError, TypeError):
+            pass
+    elif result_path.exists():
+        status = TaskStatus.SUCCESS.value
+
+    if status == TaskStatus.CANCELED.value:
+        return R.success({"task_id": task_id, "status": status, "message": "任务已取消"})
+    if status in {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value}:
+        return R.error(msg="只有排队中或运行中的任务可以取消", code=400)
+
+    task_cancellation_registry.request(task_id)
+    NoteGenerator()._update_status(task_id, TaskStatus.CANCELED, "用户请求取消，当前请求结束后停止")
+    return R.success({
+        "task_id": task_id,
+        "status": TaskStatus.CANCELED.value,
+        "message": "已请求停止，当前请求结束后生效",
+    })
 
 
 @router.post("/single/tasks/{task_id}/regenerate")

@@ -8,12 +8,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.sizeIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -32,24 +33,19 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.bilinote.android.core.designsystem.ImageCompressionSelector
 
 @Composable
 fun BatchDetailPane(
     uiState: BatchUiState,
     onRefresh: () -> Unit,
     onUpdate: (title: String, config: BatchConfig) -> Unit,
-    onPreviewAppend: (sourceUrl: String) -> Unit,
-    onAppend: () -> Unit,
     onExport: (batchId: String?, itemIds: List<String>?) -> Unit,
     onExportItem: (itemId: String) -> Unit,
     onOpenReader: (taskId: String) -> Unit,
     onRetry: (itemId: String) -> Unit,
     onDelete: (itemId: String) -> Unit,
     onLoadEvents: (itemId: String) -> Unit,
-    onTogglePreview: (itemId: String) -> Unit,
-    onSelectAll: () -> Unit,
-    onClearSelection: () -> Unit,
-    previewSelectionKey: (BatchPreviewItem, Int) -> String,
     showItems: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
@@ -64,109 +60,67 @@ fun BatchDetailPane(
         return
     }
 
-    var appendUrl by remember(task.id) { mutableStateOf("") }
     var editing by remember(task.id) { mutableStateOf(false) }
     val selectedItem = uiState.items.firstOrNull { it.id == (uiState.eventsItemId ?: uiState.selectedItemId) }
 
-    Column(
+    LazyColumn(
         modifier = modifier
             .fillMaxSize()
             .testTag("batch-detail")
-            .semantics { contentDescription = "合集详情 ${task.title ?: task.id}" }
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
+            .semantics { contentDescription = "合集详情 ${task.title ?: task.id}" },
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(task.title?.ifBlank { null } ?: task.id.orEmpty(), style = MaterialTheme.typography.headlineSmall)
-                Text("状态：${batchStatusLabel(task.status)} · ${task.completedCount}/${task.totalCount}")
-            }
-            OutlinedButton(
-                onClick = onRefresh,
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).testTag("batch-detail-refresh"),
-            ) { Text("刷新") }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(
-                onClick = { editing = true },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).testTag("batch-edit"),
-            ) { Text("编辑") }
-            Button(
-                onClick = { onExport(task.id, null) },
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).testTag("batch-export"),
-            ) { Text("导出合集") }
-        }
-        Text("配置：quality=${task.config?.quality ?: "未知"}，style=${task.config?.style ?: "未知"}")
-        Text("videoUnderstanding=${task.config?.videoUnderstanding == true}，format=${task.config?.format?.joinToString().orEmpty()}")
-
-        Text("追加条目", style = MaterialTheme.typography.titleMedium)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = appendUrl,
-                onValueChange = { appendUrl = it },
-                modifier = Modifier.weight(1f),
-                label = { Text("B站合集链接") },
-                singleLine = true,
-            )
-            OutlinedButton(
-                onClick = { onPreviewAppend(appendUrl) },
-                enabled = appendUrl.isNotBlank() && !uiState.isLoading,
-                modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp),
-            ) { Text("预览") }
-        }
-        uiState.preview?.let { preview ->
-            Text("追加预览：${preview.items.size} 项")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(
-                    onClick = onSelectAll,
-                    modifier = Modifier.sizeIn(minHeight = 48.dp),
-                ) { Text("全选") }
-                TextButton(
-                    onClick = onClearSelection,
-                    modifier = Modifier.sizeIn(minHeight = 48.dp),
-                ) { Text("清空") }
-                Button(
-                    onClick = onAppend,
-                    enabled = uiState.selectedPreviewIds.isNotEmpty() && !uiState.isAppending,
-                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp),
-                ) { Text(if (uiState.isAppending) "追加中…" else "追加") }
-            }
-            preview.items.forEachIndexed { index, item ->
-                val selectionKey = previewSelectionKey(item, index)
-                if (selectionKey.isNotBlank()) {
-                    val videoTitle = item.title?.ifBlank { null } ?: item.sourceUrl ?: selectionKey
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .sizeIn(minHeight = 48.dp)
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            checked = selectionKey in uiState.selectedPreviewIds,
-                            onCheckedChange = { onTogglePreview(selectionKey) },
-                            modifier = Modifier.semantics {
-                                contentDescription = "选择视频：$videoTitle"
-                                role = Role.Checkbox
-                            },
-                        )
-                        Text(
-                            videoTitle,
-                            modifier = Modifier.padding(start = 8.dp),
-                        )
-                    }
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(task.title?.ifBlank { null } ?: task.id.orEmpty(), style = MaterialTheme.typography.headlineSmall)
+                    Text("状态：${batchStatusLabel(task.status)}")
                 }
+                OutlinedButton(
+                    onClick = onRefresh,
+                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).testTag("batch-detail-refresh"),
+                ) { Text("刷新") }
             }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { editing = true },
+                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).testTag("batch-edit"),
+                ) { Text("编辑") }
+                Button(
+                    onClick = { onExport(task.id, null) },
+                    modifier = Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp).testTag("batch-export"),
+                ) { Text("导出合集") }
+            }
+        }
+        item {
+            Text("进度摘要", style = MaterialTheme.typography.titleMedium)
+            Text("已完成 ${task.completedCount} / ${task.totalCount} 项 · 失败 ${task.failedCount} · 处理中 ${task.runningCount}")
+            LinearProgressIndicator(
+                progress = { task.progress.toFloat().coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().testTag("batch-progress"),
+            )
+        }
+        item {
+            Text("配置摘要", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "质量 ${task.config?.quality ?: "未知"} · 风格 ${task.config?.style ?: "未知"} · " +
+                    "格式 ${task.config?.format?.joinToString().orEmpty().ifBlank { "默认" }}",
+            )
         }
 
         if (showItems) {
-            Text("子任务", style = MaterialTheme.typography.titleMedium)
-            uiState.items.forEach { item ->
+            item { Text("子任务", style = MaterialTheme.typography.titleMedium) }
+            items(
+                items = uiState.items,
+                key = { it.id ?: "item-${it.position}-${it.taskId}" },
+            ) { item ->
                 BatchItemRow(
                     item = item,
                     onOpenReader = { item.taskId?.let(onOpenReader) },
@@ -177,24 +131,28 @@ fun BatchDetailPane(
                 )
             }
         }
-        if (!showItems || selectedItem != null) {
-            if (selectedItem == null) {
-                Text("日志", style = MaterialTheme.typography.titleMedium)
-                Text("请选择一个子任务查看日志")
-            } else {
-                Text("日志：${selectedItem.title ?: selectedItem.id}", style = MaterialTheme.typography.titleMedium)
-                if (uiState.events.isEmpty()) {
-                    Text("暂无日志")
+        item {
+            if (!showItems || selectedItem != null) {
+                if (selectedItem == null) {
+                    Text("日志", style = MaterialTheme.typography.titleMedium)
+                    Text("请选择一个子任务查看日志")
                 } else {
-                    uiState.events.forEach { event ->
-                        Text("${event.createdAt.orEmpty()} · ${event.status.orEmpty()} · ${event.message.orEmpty()}")
+                    Text("日志：${selectedItem.title ?: selectedItem.id}", style = MaterialTheme.typography.titleMedium)
+                    if (uiState.events.isEmpty()) {
+                        Text("暂无日志")
+                    } else {
+                        uiState.events.forEach { event ->
+                            Text("${event.createdAt.orEmpty()} · ${event.status.orEmpty()} · ${event.message.orEmpty()}")
+                        }
                     }
                 }
+            } else {
+                Text("点击子任务查看日志")
             }
-        } else {
-            Text("点击子任务查看日志")
         }
-        uiState.actionError?.let { Text("操作失败：$it", color = MaterialTheme.colorScheme.error) }
+        item {
+            uiState.actionError?.let { Text("操作失败：$it", color = MaterialTheme.colorScheme.error) }
+        }
     }
 
     if (editing) {
@@ -220,26 +178,26 @@ fun BatchSubtaskPane(
     modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-            .testTag("batch-subtask-list"),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = modifier.fillMaxSize().padding(16.dp).testTag("batch-subtask-list"),
     ) {
         Text("子任务", style = MaterialTheme.typography.titleLarge)
         if (uiState.items.isEmpty()) {
             Text("暂无子任务")
         } else {
-            uiState.items.forEach { item ->
-                BatchItemRow(
-                    item = item,
-                    onOpenReader = { item.taskId?.let(onOpenReader) },
-                    onExport = { item.id?.let(onExportItem) },
-                    onRetry = { item.id?.let(onRetry) },
-                    onDelete = { item.id?.let(onDelete) },
-                    onLoadEvents = { item.id?.let(onLoadEvents) },
-                )
+            LazyColumn(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(uiState.items, key = { it.id ?: "item-${it.position}" }) { item ->
+                    BatchItemRow(
+                        item = item,
+                        onOpenReader = { item.taskId?.let(onOpenReader) },
+                        onExport = { item.id?.let(onExportItem) },
+                        onRetry = { item.id?.let(onRetry) },
+                        onDelete = { item.id?.let(onDelete) },
+                        onLoadEvents = { item.id?.let(onLoadEvents) },
+                    )
+                }
             }
         }
     }
@@ -312,6 +270,7 @@ private fun BatchEditDialog(
     var extras by remember(task.id, original.extras) { mutableStateOf(original.extras) }
     var videoInterval by remember(task.id, original.videoInterval) { mutableStateOf(original.videoInterval.toString()) }
     var gridSize by remember(task.id, original.gridSize) { mutableStateOf(original.gridSize.joinToString(" x ")) }
+    var imageCompression by remember(task.id, original.imageCompression) { mutableStateOf(original.imageCompression) }
     var format by remember(task.id, original.format) { mutableStateOf(original.format.joinToString(",")) }
     var videoUnderstanding by remember(task.id, original.videoUnderstanding) { mutableStateOf(original.videoUnderstanding) }
     var link by remember(task.id, original.link) { mutableStateOf(original.link) }
@@ -351,6 +310,11 @@ private fun BatchEditDialog(
                 OutlinedTextField(extras, { extras = it }, label = { Text("extras") }, minLines = 2)
                 OutlinedTextField(videoInterval, { videoInterval = it.filter(Char::isDigit) }, label = { Text("videoInterval") }, singleLine = true)
                 OutlinedTextField(gridSize, { gridSize = it }, label = { Text("gridSize") }, singleLine = true)
+                ImageCompressionSelector(
+                    value = imageCompression,
+                    onValueChange = { imageCompression = it },
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 OutlinedTextField(format, { updateFormat(it) }, label = { Text("format，逗号分隔") }, singleLine = true)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(
@@ -404,6 +368,7 @@ private fun BatchEditDialog(
                             extras = extras,
                             videoInterval = videoInterval.toIntOrNull()?.coerceAtLeast(1) ?: original.videoInterval,
                             gridSize = parseGridSize(gridSize, original.gridSize),
+                            imageCompression = imageCompression,
                             format = format.split(",").map(String::trim).filter(String::isNotEmpty)
                                 .filter { it != "screenshot" || videoUnderstanding },
                             linkOverride = link,

@@ -12,6 +12,20 @@ export type BatchItem = {
   attempts: number
 }
 
+export type ImageCompression = 'high' | 'medium' | 'original'
+
+export const imageCompressionOptions: Array<{ value: ImageCompression; label: string }> = [
+  { value: 'high', label: '高压缩（JPEG/720p）' },
+  { value: 'medium', label: '中等（JPEG）' },
+  { value: 'original', label: '最高/原图（PNG）' },
+]
+
+export function normaliseImageCompression(value: unknown): ImageCompression {
+  if (value === 'medium') return 'medium'
+  if (value === 'original' || value === 'highest' || value === 'lossless' || value === 'none') return 'original'
+  return 'high'
+}
+
 export type BatchTask = {
   id: string
   title: string
@@ -21,6 +35,7 @@ export type BatchTask = {
   total_count: number
   completed_count: number
   failed_count: number
+  canceled_count: number
   running_count: number
   progress: number
   created_at?: string
@@ -39,6 +54,7 @@ export type BatchGenerationConfig = {
   video_understanding: boolean
   video_interval: number
   grid_size: number[]
+  image_compression: ImageCompression
 }
 
 export type Provider = { id: string; name: string; base_url: string; type: string; enabled?: number }

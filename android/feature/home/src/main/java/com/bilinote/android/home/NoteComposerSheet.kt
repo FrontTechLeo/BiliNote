@@ -40,6 +40,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
+import com.bilinote.android.core.designsystem.ImageCompressionLevel
+import com.bilinote.android.core.designsystem.ImageCompressionSelector
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
@@ -65,6 +67,7 @@ fun NoteComposerSheet(
     var videoUnderstanding by remember { mutableStateOf(false) }
     var videoInterval by remember { mutableStateOf("6") }
     var gridSize by remember { mutableStateOf("2 x 2") }
+    var imageCompression by remember { mutableStateOf(ImageCompressionLevel.HIGH.wireValue) }
     var extras by remember { mutableStateOf("") }
     var selectedFormats by remember { mutableStateOf(setOf("toc", "summary")) }
     var localUri by remember { mutableStateOf<Uri?>(null) }
@@ -179,6 +182,11 @@ fun NoteComposerSheet(
                 label = { Text("网格尺寸") },
                 singleLine = true,
             )
+            ImageCompressionSelector(
+                value = imageCompression,
+                onValueChange = { imageCompression = it },
+                modifier = Modifier.fillMaxWidth(),
+            )
             HorizontalDivider(modifier = Modifier.padding(vertical = spacing.xs))
             Text("输出格式", style = MaterialTheme.typography.titleMedium)
             listOf(
@@ -249,6 +257,7 @@ fun NoteComposerSheet(
                                 videoUnderstanding = videoUnderstanding,
                                 videoInterval = videoInterval.toIntOrNull() ?: 6,
                                 gridSize = parseGridSize(gridSize),
+                                imageCompression = imageCompression,
                                 localVideo = localPart,
                             ),
                         )

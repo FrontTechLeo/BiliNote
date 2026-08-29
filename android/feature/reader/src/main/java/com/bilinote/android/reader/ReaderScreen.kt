@@ -10,11 +10,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -26,19 +25,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicReference
 
 @Composable
 fun ReaderScreen(
@@ -125,6 +125,12 @@ private fun ReaderPane(
             onExport = onExport,
         )
         HorizontalDivider()
+        if (progress != null && uiState.loadState is ReaderLoadState.Success) {
+            LinearProgressIndicator(
+                progress = { progress.percent.toFloat().coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().testTag("reader-progress"),
+            )
+        }
         when (val state = uiState.loadState) {
             ReaderLoadState.Loading -> StatusPane("正在加载笔记…", showProgress = true)
             is ReaderLoadState.Error -> StatusPane(state.message, showProgress = false, onRetry = onRetry)
@@ -211,52 +217,59 @@ private fun ReaderMarkdownContent(
     onOpenTimeLink: (Int) -> Unit,
     accessToken: String?,
 ) {
-    val scrollState = rememberScrollState()
-    var measured by remember(task.taskId, task.updatedAt) { mutableStateOf(false) }
-    var restored by remember(task.taskId, task.updatedAt, progress?.scrollOffset) { mutableStateOf(false) }
+    var restored by remember(task.taskId, task.updatedAt) { mutableStateOf(false) }
     val initialOffset = progress?.scrollOffset ?: 0
-
-    LaunchedEffect(task.taskId, task.serviceBaseUrl, initialOffset, measured) {
-        if (measured) {
-            scrollState.scrollTo(initialOffset.coerceIn(0, scrollState.maxValue))
-            restored = true
-        }
+    val latestScroll = remember(task.taskId, task.updatedAt) {
+        AtomicReference(ReaderScrollSnapshot(initialOffset, 0))
+    }
+    val scrollEvents = remember(task.taskId, task.updatedAt) {
+        MutableSharedFlow<ReaderScrollSnapshot>(
+            extraBufferCapacity = 1,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        )
     }
 
     LaunchedEffect(task.taskId, task.serviceBaseUrl) {
         try {
-            snapshotFlow { scrollState.value }
+            scrollEvents
                 .sample(180)
-                .collectLatest { offset ->
+                .collectLatest { snapshot ->
                     progressStore.saveThrottled(
-                        task.progress(offset, scrollState.maxValue),
+                        task.progress(snapshot.offset, snapshot.maxOffset),
                     )
                 }
         } finally {
             withContext(NonCancellable) {
-                progressStore.saveNow(task.progress(scrollState.value, scrollState.maxValue))
+                val snapshot = latestScroll.get()
+                progressStore.saveNow(task.progress(snapshot.offset, snapshot.maxOffset))
             }
         }
     }
 
-    Column(
+    MarkdownRenderer(
+        markdown = task.markdown.orEmpty(),
+        backendUrl = task.serviceBaseUrl,
+        accessToken = accessToken,
+        initialScrollOffset = initialOffset,
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(scrollState)
             .padding(horizontal = 20.dp, vertical = 16.dp)
-            .onGloballyPositioned { measured = true }
             .testTag("reader-content")
             .then(if (restored) Modifier.testTag("reader-content-restored") else Modifier),
-    ) {
-        MarkdownRenderer(
-            markdown = task.markdown.orEmpty(),
-            backendUrl = task.serviceBaseUrl,
-            accessToken = accessToken,
-            modifier = Modifier.fillMaxWidth(),
-            onOpenTimeLink = onOpenTimeLink,
-        )
-    }
+        onOpenTimeLink = onOpenTimeLink,
+        onScrollChanged = { offset, maxOffset ->
+            val snapshot = ReaderScrollSnapshot(offset, maxOffset)
+            latestScroll.set(snapshot)
+            scrollEvents.tryEmit(snapshot)
+        },
+        onRestored = { restored = true },
+    )
 }
+
+private data class ReaderScrollSnapshot(
+    val offset: Int,
+    val maxOffset: Int,
+)
 
 private fun com.bilinote.android.database.entity.TaskEntity.progress(
     offset: Int,

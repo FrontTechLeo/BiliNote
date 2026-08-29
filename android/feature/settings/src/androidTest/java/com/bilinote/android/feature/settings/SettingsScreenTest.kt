@@ -36,6 +36,18 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("隐藏").assertExists()
     }
 
+    @Test fun `settings page presents grouped service configuration guidance`() {
+        val viewModel = SettingsViewModel(FakeSettingsStore(), RecordingConnectionTester())
+        composeRule.setContent { SettingsScreen(viewModel) }
+
+        composeRule.onNodeWithText("设置").assertExists()
+        composeRule.onNodeWithText("配置 BiliNote 后端服务，保存后即可使用笔记功能").assertExists()
+        composeRule.onNodeWithText("服务连接").assertExists()
+        composeRule.onNodeWithText("服务地址").assertExists()
+        composeRule.onNodeWithText("用于连接 BiliNote 后端 API").assertExists()
+        composeRule.onNodeWithText("访问凭证").assertExists()
+    }
+
     private class RecordingConnectionTester : SettingsConnectionTester {
         var url: String? = null
         var token: String? = null

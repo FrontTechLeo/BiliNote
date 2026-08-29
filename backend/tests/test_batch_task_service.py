@@ -184,10 +184,40 @@ def test_append_bilibili_items_filters_duplicates_and_reopens_completed_batch(tm
     assert rows[1].position == 2
     db.close()
 
-    with pytest.raises(ValueError, match="只有已结束"):
-        service.append_items("batch-remote", [{
+    db = session_factory()
+    task = db.get(BatchTask, "batch-remote")
+    active_item = db.query(BatchTaskItem).filter_by(batch_id="batch-remote").order_by(BatchTaskItem.position).all()[1]
+    active_item.task_id = "task-active"
+    active_item.status = TaskStatus.PARSING.value
+    active_item.stage = TaskStatus.PARSING.value
+    task.status = "RUNNING"
+    db.commit()
+    db.close()
+
+    with patch.object(service, "start") as start:
+        running_result = service.append_items("batch-remote", [{
             "title": "执行中继续追加",
             "source_url": "https://www.bilibili.com/video/BV1later/",
+            "platform": "bilibili",
+        }])
+
+    assert running_result["added_count"] == 1
+    start.assert_called_once_with("batch-remote")
+
+    db = session_factory()
+    task = db.get(BatchTask, "batch-remote")
+    assert task.status == "RUNNING"
+    assert task.total_count == 3
+    assert task.completed_count == 1
+    assert task.running_count == 1
+    task.status = "UNKNOWN"
+    db.commit()
+    db.close()
+
+    with pytest.raises(ValueError, match="状态不支持追加"):
+        service.append_items("batch-remote", [{
+            "title": "未知状态追加",
+            "source_url": "https://www.bilibili.com/video/BV1unknown/",
             "platform": "bilibili",
         }])
 
@@ -288,6 +318,51 @@ def test_local_preview_naturally_sorts_and_reuses_content_cache(tmp_path, monkey
     assert not list((tmp_path / "uploads" / "batch_previews").iterdir())
 
 
+def test_local_preview_does_not_reuse_companion_cache_with_different_suffix(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'local-cache-suffix.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(batch_module, "SessionLocal", session_factory)
+    monkeypatch.chdir(tmp_path)
+
+    service = BatchTaskService()
+    cache = tmp_path / "uploads" / "batch_videos"
+    cache.mkdir(parents=True)
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"same-video-content")
+    fingerprint = service._sampled_local_digest(source)
+    companion = cache / f"{fingerprint}.mp3"
+    companion.write_bytes(b"audio-companion")
+
+    preview = service.store_local_preview([_Upload("lesson.mp4", b"same-video-content")])
+
+    assert preview["items"][0]["source_url"] == f"/uploads/batch_videos/{fingerprint}.mp4"
+    assert not preview["items"][0]["source_url"].endswith(".mp3")
+    assert (cache / f"{fingerprint}.mp4").read_bytes() == b"same-video-content"
+    assert companion.read_bytes() == b"audio-companion"
+
+
+def test_local_batch_rejects_audio_source(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'local-audio-source.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(batch_module, "SessionLocal", session_factory)
+    monkeypatch.chdir(tmp_path)
+
+    source = tmp_path / "uploads" / "batch_videos" / "lesson.mp3"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"audio")
+
+    with pytest.raises(ValueError, match="仅支持视频文件"):
+        BatchTaskService().create_task(
+            "音频任务",
+            "local",
+            None,
+            {"model_name": "demo", "provider_id": "provider"},
+            [{"title": "lesson", "source_url": "/uploads/batch_videos/lesson.mp3", "platform": "local"}],
+        )
+
+
 def test_local_cache_cleanup_keeps_referenced_files(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'local-cleanup.db'}")
     Base.metadata.create_all(engine)
@@ -362,7 +437,7 @@ def test_local_batch_generation_uses_original_title_and_hides_cache_url(tmp_path
         id="display-batch",
         title="本地课程",
         source_type="local",
-        config_json='{"model_name":"demo","provider_id":"provider"}',
+        config_json='{"model_name":"demo","provider_id":"provider","image_compression":"medium"}',
         status="RUNNING",
     ))
     db.add(BatchTaskItem(
@@ -389,6 +464,7 @@ def test_local_batch_generation_uses_original_title_and_hides_cache_url(tmp_path
     assert kwargs["display_title"] == "2-01-AI通识与基础-认识人工智能"
     assert kwargs["source_link"] == ""
     assert kwargs["video_url"] == source_url
+    assert kwargs["image_compression"] == "medium"
 
 
 def test_submit_item_claims_pending_row_before_executor_submission(tmp_path, monkeypatch):
@@ -567,3 +643,65 @@ def test_delete_batch_items_rejects_active_children(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="运行中或排队中的子任务不能删除"):
         BatchTaskService().delete_items("active-batch", ["active-item"])
+
+
+def test_cancel_batch_item_marks_terminal_and_preserves_task_id(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'batch-cancel.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(batch_module, "SessionLocal", session_factory)
+
+    db = session_factory()
+    db.add(BatchTask(
+        id="cancel-batch", title="取消测试", source_type="local", config_json="{}",
+        status="RUNNING", total_count=1, running_count=1,
+    ))
+    db.add(BatchTaskItem(
+        id="cancel-item", batch_id="cancel-batch", task_id="cancel-task",
+        source_url="/uploads/batch_videos/cancel.mp4", platform="local", title="取消课程",
+        position=1, status=TaskStatus.TRANSCRIBING.value, stage=TaskStatus.TRANSCRIBING.value,
+    ))
+    db.commit()
+    db.close()
+
+    service = BatchTaskService()
+    result = service.cancel_item("cancel-batch", "cancel-item")
+
+    assert result["status"] == TaskStatus.CANCELED.value
+    assert result["task_id"] == "cancel-task"
+    db = session_factory()
+    task = db.get(BatchTask, "cancel-batch")
+    item = db.get(BatchTaskItem, "cancel-item")
+    event = db.query(BatchTaskEvent).filter_by(batch_item_id="cancel-item").one()
+    assert task.status == "CANCELED"
+    assert task.canceled_count == 1
+    assert task.running_count == 0
+    assert item.status == TaskStatus.CANCELED.value
+    assert item.stage == TaskStatus.CANCELED.value
+    assert event.status == TaskStatus.CANCELED.value
+    db.close()
+
+
+def test_late_status_cannot_resurrect_canceled_item(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'batch-cancel-late.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(batch_module, "SessionLocal", session_factory)
+
+    db = session_factory()
+    db.add(BatchTask(id="late-batch", title="晚到状态", source_type="local", config_json="{}", status="RUNNING", total_count=1))
+    db.add(BatchTaskItem(
+        id="late-item", batch_id="late-batch", task_id="late-task", source_url="url",
+        platform="local", title="晚到课程", position=1, status=TaskStatus.CANCELED.value,
+    ))
+    db.commit()
+    db.close()
+
+    service = BatchTaskService()
+    service.sync_child_status("late-task", TaskStatus.SUCCESS.value, "迟到的成功状态")
+
+    db = session_factory()
+    item = db.get(BatchTaskItem, "late-item")
+    assert item.status == TaskStatus.CANCELED.value
+    assert db.query(BatchTaskEvent).filter_by(batch_item_id="late-item").count() == 0
+    db.close()

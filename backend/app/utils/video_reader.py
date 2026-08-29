@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import io
 import os
 import re
 import subprocess
@@ -11,6 +12,50 @@ from app.utils.logger import get_logger
 from app.utils.path_helper import get_app_dir
 
 logger = get_logger(__name__)
+
+
+DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+PROVIDER_MAX_IMAGE_BYTES = 30 * 1024 * 1024
+DEFAULT_IMAGE_COMPRESSION = "high"
+IMAGE_COMPRESSION_PROFILES = {
+    "high": {
+        "format": "JPEG",
+        "mime_type": "image/jpeg",
+        "max_size": (1280, 720),
+        "quality": 70,
+        "max_bytes": DEFAULT_MAX_IMAGE_BYTES,
+    },
+    "medium": {
+        "format": "JPEG",
+        "mime_type": "image/jpeg",
+        "max_size": (1600, 900),
+        "quality": 82,
+        "max_bytes": 16 * 1024 * 1024,
+    },
+    "original": {
+        "format": "PNG",
+        "mime_type": "image/png",
+        "max_size": None,
+        "quality": None,
+        "max_bytes": None,
+    },
+}
+IMAGE_COMPRESSION_ALIASES = {
+    "highest": "original",
+    "lossless": "original",
+    "none": "original",
+}
+
+
+def normalize_image_compression(value: str | None) -> str:
+    normalized = str(value or DEFAULT_IMAGE_COMPRESSION).strip().lower()
+    normalized = IMAGE_COMPRESSION_ALIASES.get(normalized, normalized)
+    if normalized not in IMAGE_COMPRESSION_PROFILES:
+        choices = ", ".join(IMAGE_COMPRESSION_PROFILES)
+        raise ValueError(f"image_compression 必须是以下值之一：{choices}")
+    return normalized
+
+
 class VideoReader:
     def __init__(self,
                  video_path: str,
@@ -20,6 +65,7 @@ class VideoReader:
                  unit_width=960,
                  unit_height=540,
                  save_quality=90,
+                 image_compression=DEFAULT_IMAGE_COMPRESSION,
                  font_path="fonts/arial.ttf",
                  frame_dir=None,
                  grid_dir=None):
@@ -30,10 +76,95 @@ class VideoReader:
         self.unit_width = unit_width
         self.unit_height = unit_height
         self.save_quality = save_quality
+        self.image_compression = normalize_image_compression(image_compression)
         self.frame_dir = frame_dir or get_app_dir("output_frames")
         self.grid_dir = grid_dir or get_app_dir("grid_output")
         print(f"视频路径：{video_path}",self.frame_dir,self.grid_dir)
         self.font_path = font_path
+
+    def _max_image_bytes(self) -> int:
+        default_max_bytes = IMAGE_COMPRESSION_PROFILES[self.image_compression]["max_bytes"]
+        configured = os.getenv("OPENAI_MAX_IMAGE_BYTES", str(default_max_bytes))
+        try:
+            max_bytes = int(configured)
+        except ValueError as exc:
+            raise ValueError("OPENAI_MAX_IMAGE_BYTES 必须是正整数") from exc
+        if max_bytes <= 0:
+            raise ValueError("OPENAI_MAX_IMAGE_BYTES 必须是正整数")
+        return max_bytes
+
+    @staticmethod
+    def _encode_jpeg(image: Image.Image, quality: int) -> bytes:
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=quality,
+            optimize=True,
+            progressive=True,
+        )
+        return buffer.getvalue()
+
+    def _encode_image_with_limit(self, path: str, max_bytes: int) -> bytes:
+        original_size = os.path.getsize(path)
+        if original_size <= max_bytes:
+            with open(path, "rb") as img_file:
+                return img_file.read()
+
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+
+        # 先降低 JPEG 质量，仍然超限时再逐步缩小网格，确保不会把
+        # 单张图片原样交给供应商。8MB 的默认上限远低于 OpenRouter 的
+        # 30MB 单图限制，也为 Base64 和请求 JSON 留出余量。
+        try:
+            while True:
+                for quality in (85, 75, 65, 55, 45, 35):
+                    encoded = self._encode_jpeg(image, quality)
+                    if len(encoded) <= max_bytes:
+                        logger.info(
+                            "图片 %s 从 %.2fMB 压缩至 %.2fMB",
+                            path,
+                            original_size / (1024 * 1024),
+                            len(encoded) / (1024 * 1024),
+                        )
+                        return encoded
+
+                width, height = image.size
+                if max(width, height) <= 320:
+                    raise ValueError(
+                        f"图片 {path} 在最小尺寸下仍超过 {max_bytes} 字节"
+                    )
+                resized = image.copy()
+                resized.thumbnail(
+                    (max(320, int(width * 0.8)), max(320, int(height * 0.8))),
+                    Image.Resampling.LANCZOS,
+                )
+                image.close()
+                image = resized
+        finally:
+            image.close()
+
+    def _encode_original_png(self, path: str) -> bytes:
+        if os.path.getsize(path) <= PROVIDER_MAX_IMAGE_BYTES and path.lower().endswith(".png"):
+            with open(path, "rb") as img_file:
+                image_bytes = img_file.read()
+        else:
+            with Image.open(path) as source:
+                image = source.convert("RGB")
+            try:
+                image_bytes = io.BytesIO()
+                image.save(image_bytes, format="PNG", optimize=True)
+                image_bytes = image_bytes.getvalue()
+            finally:
+                image.close()
+
+        if len(image_bytes) > PROVIDER_MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"原图 {path} 的 PNG 大小为 {len(image_bytes) / (1024 * 1024):.2f}MB，"
+                "超过供应商单图 30MB 限制，请选择 high 或 medium"
+            )
+        return image_bytes
 
     @staticmethod
     def _calculate_file_md5(file_path: str) -> str:
@@ -132,16 +263,36 @@ class VideoReader:
             y = (i // cols) * self.unit_height
             grid_img.paste(img, (x, y))
 
-        save_path = os.path.join(self.grid_dir, f"{name}.jpg")
-        grid_img.save(save_path, quality=self.save_quality)
+        profile = IMAGE_COMPRESSION_PROFILES[self.image_compression]
+        if profile["max_size"]:
+            grid_img.thumbnail(profile["max_size"], Image.Resampling.LANCZOS)
+
+        extension = ".png" if profile["format"] == "PNG" else ".jpg"
+        save_path = os.path.join(self.grid_dir, f"{name}{extension}")
+        if profile["format"] == "PNG":
+            grid_img.save(save_path, format="PNG", optimize=True)
+        else:
+            grid_img.save(
+                save_path,
+                format="JPEG",
+                quality=min(self.save_quality, profile["quality"]),
+                optimize=True,
+                progressive=True,
+            )
         return save_path
 
     def encode_images_to_base64(self, image_paths: list[str]) -> list[str]:
+        profile = IMAGE_COMPRESSION_PROFILES[self.image_compression]
+        max_bytes = self._max_image_bytes() if profile["format"] == "JPEG" else None
         base64_images = []
         for path in image_paths:
-            with open(path, "rb") as img_file:
-                encoded_string = base64.b64encode(img_file.read()).decode("utf-8")
-                base64_images.append(f"data:image/jpeg;base64,{encoded_string}")
+            image_bytes = (
+                self._encode_image_with_limit(path, max_bytes)
+                if max_bytes is not None
+                else self._encode_original_png(path)
+            )
+            encoded_string = base64.b64encode(image_bytes).decode("utf-8")
+            base64_images.append(f"data:{profile['mime_type']};base64,{encoded_string}")
         return base64_images
 
     def run(self)->list[str]:
@@ -178,6 +329,8 @@ class VideoReader:
             return urls
         except Exception as e:
             logger.error(f"发生错误：{str(e)}")
+            if isinstance(e, ValueError):
+                raise
             raise ValueError("视频处理失败")
 
 

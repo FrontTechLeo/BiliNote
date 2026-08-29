@@ -10,8 +10,11 @@ import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
@@ -32,6 +35,7 @@ data class BiliNoteNavigationDestination(
     val onClick: () -> Unit,
     val enabled: Boolean = true,
     val contentDescription: String = label,
+    val showInCompactNavigation: Boolean = true,
 )
 
 @Composable
@@ -43,23 +47,34 @@ fun AdaptiveScaffold(
     content: @Composable () -> Unit,
 ) {
     if (windowWidthSizeClass == WindowWidthSizeClass.Compact) {
+        val compactDestinations = destinations.filter(BiliNoteNavigationDestination::showInCompactNavigation)
         Scaffold(
             modifier = modifier,
             bottomBar = {
-                NavigationBar {
-                    destinations.forEach { destination ->
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 0.dp,
+                ) {
+                    compactDestinations.forEach { destination ->
                         key(destination.id) {
                             NavigationBarItem(
                                 selected = destination.selected,
                                 onClick = destination.onClick,
                                 enabled = destination.enabled,
-                                modifier = Modifier.semantics {
-                                    contentDescription = destination.contentDescription
-                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .semantics {
+                                        contentDescription = destination.contentDescription
+                                    },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    selectedTextColor = MaterialTheme.colorScheme.primary,
+                                    indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                ),
                                 icon = {
-                                    Box(
-                                        Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp),
-                                    ) { destination.icon() }
+                                    destination.icon()
                                 },
                                 label = { androidx.compose.material3.Text(destination.label) },
                             )
@@ -84,9 +99,17 @@ fun AdaptiveScaffold(
                             modifier = Modifier.semantics {
                                 contentDescription = destination.contentDescription
                             },
+                            colors = NavigationRailItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            ),
                             icon = {
                                 Box(
                                     Modifier.sizeIn(minWidth = 48.dp, minHeight = 48.dp),
+                                    contentAlignment = Alignment.Center,
                                 ) { destination.icon() }
                             },
                             label = { androidx.compose.material3.Text(destination.label) },

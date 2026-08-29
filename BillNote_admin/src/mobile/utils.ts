@@ -1,3 +1,4 @@
+import { normaliseImageCompression } from '../types'
 import type { BatchGenerationConfig } from '../types'
 
 export const batchStyles = [
@@ -17,7 +18,7 @@ export const batchFormats = [
 export const defaultBatchConfig: BatchGenerationConfig = {
   quality: 'medium', model_name: '', provider_id: '', screenshot: false, link: false,
   format: ['toc', 'summary'], style: 'tutorial', extras: '', video_understanding: false,
-  video_interval: 6, grid_size: [2, 2],
+  video_interval: 6, grid_size: [2, 2], image_compression: 'high',
 }
 
 export function normaliseBatchConfig(config?: Partial<BatchGenerationConfig>): BatchGenerationConfig {
@@ -30,14 +31,16 @@ export function normaliseBatchConfig(config?: Partial<BatchGenerationConfig>): B
     ...config,
     format: Array.isArray(config?.format) ? config.format : defaultBatchConfig.format,
     grid_size: Array.isArray(grid) && grid.length === 2 ? grid : [2, 2],
+    image_compression: normaliseImageCompression(config?.image_compression),
   }
 }
 
 export function configForApi(config: BatchGenerationConfig) {
+  const normalised = normaliseBatchConfig(config)
   return {
-    ...normaliseBatchConfig(config),
-    link: config.format.includes('link'),
-    screenshot: config.format.includes('screenshot'),
+    ...normalised,
+    link: normalised.format.includes('link'),
+    screenshot: normalised.format.includes('screenshot'),
   }
 }
 
@@ -58,13 +61,17 @@ export function formatBytes(bytes: number) {
 }
 
 export function batchStatusLabel(status?: string) {
-  return ({ SUCCESS: '已完成', FAILED: '全部失败', PARTIAL_FAILED: '部分失败', RUNNING: '处理中', PENDING: '排队中' } as Record<string, string>)[status || ''] || status || '未知状态'
+  return ({ SUCCESS: '已完成', FAILED: '全部失败', CANCELED: '已取消', PARTIAL_FAILED: '部分失败', RUNNING: '处理中', PENDING: '排队中' } as Record<string, string>)[status || ''] || status || '未知状态'
 }
 
 export function itemStatusLabel(status?: string) {
-  return ({ SUCCESS: '已完成', FAILED: '处理失败', RUNNING: '处理中', PENDING: '排队中' } as Record<string, string>)[status || ''] || status || '未知状态'
+  return ({ SUCCESS: '已完成', FAILED: '处理失败', CANCELED: '已取消', RUNNING: '处理中', PENDING: '排队中' } as Record<string, string>)[status || ''] || status || '未知状态'
 }
 
 export function isTerminalBatch(status?: string) {
-  return ['SUCCESS', 'FAILED', 'PARTIAL_FAILED'].includes(status || '')
+  return ['SUCCESS', 'FAILED', 'PARTIAL_FAILED', 'CANCELED'].includes(status || '')
+}
+
+export function canAppendBatch(status?: string) {
+  return ['PENDING', 'RUNNING', 'SUCCESS', 'FAILED', 'PARTIAL_FAILED', 'CANCELED'].includes(status || '')
 }

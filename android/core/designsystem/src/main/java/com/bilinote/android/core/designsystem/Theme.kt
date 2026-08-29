@@ -16,21 +16,21 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-private val BiliNoteBlue = Color(0xFF00AEEC)
-private val BiliNoteBlueDark = Color(0xFF7DD8FF)
-private val BiliNoteInk = Color(0xFF17202A)
-private val BiliNoteInkDark = Color(0xFFE5F2F8)
-private val BiliNoteSurface = Color(0xFFF7FAFC)
-private val BiliNoteSurfaceDark = Color(0xFF111A20)
+private val BiliNoteMint = Color(0xFF0E9F86)
+private val BiliNoteMintDark = Color(0xFF68D4BD)
+private val BiliNoteInk = Color(0xFF182126)
+private val BiliNoteInkDark = Color(0xFFE5F2EF)
+private val BiliNotePage = Color(0xFFF4F7F6)
+private val BiliNotePageDark = Color(0xFF111A18)
 
 private val LightColorScheme = lightColorScheme(
-    primary = BiliNoteBlue,
+    primary = BiliNoteMint,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFD5F3FF),
-    onPrimaryContainer = Color(0xFF003547),
+    primaryContainer = Color(0xFFE6F7F2),
+    onPrimaryContainer = Color(0xFF087B68),
     secondary = Color(0xFF53656D),
     onSecondary = Color.White,
-    background = BiliNoteSurface,
+    background = BiliNotePage,
     onBackground = BiliNoteInk,
     surface = Color.White,
     onSurface = BiliNoteInk,
@@ -39,13 +39,13 @@ private val LightColorScheme = lightColorScheme(
 )
 
 private val DarkColorScheme = darkColorScheme(
-    primary = BiliNoteBlueDark,
-    onPrimary = Color(0xFF003547),
-    primaryContainer = Color(0xFF00516A),
-    onPrimaryContainer = Color(0xFFD5F3FF),
+    primary = BiliNoteMintDark,
+    onPrimary = Color(0xFF00382E),
+    primaryContainer = Color(0xFF005A4A),
+    onPrimaryContainer = Color(0xFFB4F0E1),
     secondary = Color(0xFFB6CBD3),
     onSecondary = Color(0xFF21343B),
-    background = BiliNoteSurfaceDark,
+    background = BiliNotePageDark,
     onBackground = BiliNoteInkDark,
     surface = Color(0xFF18242B),
     onSurface = BiliNoteInkDark,
@@ -80,9 +80,21 @@ data class BiliNoteSpacing(
 )
 
 object BiliNoteShapes {
-    val card = RoundedCornerShape(16.dp)
-    val smallCard = RoundedCornerShape(12.dp)
+    val card = RoundedCornerShape(8.dp)
+    val smallCard = RoundedCornerShape(6.dp)
     val pill = RoundedCornerShape(50)
+}
+
+object BiliNotePalette {
+    val pageBackground = Color(0xFFF4F7F6)
+    val ink = Color(0xFF182126)
+    val muted = Color(0xFF79858D)
+    val divider = Color(0xFFE6EBED)
+    val primary = Color(0xFF0E9F86)
+    val primarySoft = Color(0xFFE6F7F2)
+    val success = Color(0xFF4DB89F)
+    val progress = Color(0xFF5795E7)
+    val danger = Color(0xFFD9604F)
 }
 
 object BiliNoteLayoutTokens {

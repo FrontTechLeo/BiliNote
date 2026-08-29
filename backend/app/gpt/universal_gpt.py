@@ -16,6 +16,11 @@ from app.gpt.prompt import BASE_PROMPT, AI_SUM, SCREENSHOT, LINK, MERGE_PROMPT
 from app.gpt.utils import fix_markdown
 from app.gpt.request_chunker import RequestChunker
 from app.models.transcriber_model import TranscriptSegment
+try:
+    from app.exceptions.task import TaskCancelled
+except ModuleNotFoundError:  # 兼容独立加载模块的测试/工具脚本
+    class TaskCancelled(Exception):
+        pass
 from datetime import timedelta
 from typing import List
 
@@ -27,7 +32,9 @@ class UniversalGPT(GPT):
         self.temperature = temperature
         self.screenshot = False
         self.link = False
-        self.max_request_bytes = int(os.getenv("OPENAI_MAX_REQUEST_BYTES", str(45 * 1024 * 1024)))
+        # 留出图片 Base64 编码和供应商单图限制的余量，避免本地分块器
+        # 允许一个请求通过，但 OpenRouter 在下载图片时返回 413。
+        self.max_request_bytes = int(os.getenv("OPENAI_MAX_REQUEST_BYTES", str(24 * 1024 * 1024)))
         self.checkpoint_dir = Path(os.getenv("NOTE_OUTPUT_DIR", "note_results"))
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         # 初始化时缓存重试配置，避免每次请求重复读取环境变量
@@ -167,6 +174,9 @@ class UniversalGPT(GPT):
 
     @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
+        if isinstance(exc, json.JSONDecodeError):
+            return True
+
         raw = str(exc).lower()
         retryable_tokens = (
             "error code: 524",
@@ -255,20 +265,45 @@ class UniversalGPT(GPT):
             raise
 
     def _chat_completion_create(self, messages: list):
+        cancel_check = getattr(self, "cancel_check", None)
         last_exc = None
         for attempt in range(self._max_retry_attempts):
+            self._raise_if_cancelled(cancel_check)
             try:
-                return self._do_create(messages)
+                response = self._do_create(messages)
+                self._raise_if_cancelled(cancel_check)
+                return response
             except Exception as exc:
                 last_exc = exc
-                if attempt == self._max_retry_attempts - 1 or not self._is_retryable_error(exc):
+                retryable = self._is_retryable_error(exc)
+                if isinstance(exc, json.JSONDecodeError):
+                    will_retry = attempt < self._max_retry_attempts - 1
+                    logger.warning(
+                        "LLM provider response parsing failed (attempt %d/%d; retrying=%s): %s",
+                        attempt + 1,
+                        self._max_retry_attempts,
+                        will_retry,
+                        exc,
+                    )
+                if not retryable or attempt == self._max_retry_attempts - 1:
                     raise
                 sleep_seconds = self._retry_base_backoff * (2 ** attempt)
-                time.sleep(sleep_seconds)
+                if cancel_check:
+                    deadline = time.monotonic() + sleep_seconds
+                    while time.monotonic() < deadline:
+                        self._raise_if_cancelled(cancel_check)
+                        time.sleep(min(0.25, deadline - time.monotonic()))
+                else:
+                    time.sleep(sleep_seconds)
 
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("chat completion failed without exception")
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_check) -> None:
+        if cancel_check and cancel_check():
+            raise TaskCancelled("用户已取消任务")
 
     def _merge_partials(self, partials: list, checkpoint_key: str | None, source_signature: str | None) -> str:
         def build_messages(texts, *_args, **_kwargs):
@@ -282,9 +317,11 @@ class UniversalGPT(GPT):
 
         current_partials = list(partials)
         while len(current_partials) > 1:
+            self._raise_if_cancelled(getattr(self, "cancel_check", None))
             groups = merge_chunker.group_texts_by_budget(current_partials, build_messages)
             new_partials = []
             for group_idx, group in enumerate(groups):
+                self._raise_if_cancelled(getattr(self, "cancel_check", None))
                 messages = build_messages(group)
                 try:
                     response = self._chat_completion_create(messages)
@@ -305,6 +342,8 @@ class UniversalGPT(GPT):
                     resumable_partials = new_partials + remaining_partials
                     self._save_checkpoint(checkpoint_key, source_signature, resumable_partials, "merge")
 
+                self._raise_if_cancelled(getattr(self, "cancel_check", None))
+
             current_partials = new_partials
 
         return current_partials[0]
@@ -315,6 +354,8 @@ class UniversalGPT(GPT):
         source.segment = self.ensure_segments_type(source.segment)
         checkpoint_key = source.checkpoint_key
         source_signature = self._build_source_signature(source) if checkpoint_key else None
+        self.cancel_check = source.cancel_check
+        self._raise_if_cancelled(self.cancel_check)
 
         def message_builder(segments, image_urls, **kwargs):
             return self.create_messages(segments, video_img_urls=image_urls, **kwargs)
@@ -352,6 +393,7 @@ class UniversalGPT(GPT):
             partials = []
 
         for chunk in chunks[len(partials):]:
+            self._raise_if_cancelled(self.cancel_check)
             messages = self.create_messages(
                 chunk.segments,
                 title=source.title,
@@ -387,6 +429,8 @@ class UniversalGPT(GPT):
             partials.append(content.strip())
             if checkpoint_key and source_signature:
                 self._save_checkpoint(checkpoint_key, source_signature, partials, "summarize")
+
+            self._raise_if_cancelled(self.cancel_check)
 
         if len(partials) == 1:
             if checkpoint_key:

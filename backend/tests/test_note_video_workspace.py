@@ -64,9 +64,11 @@ def test_video_understanding_uses_isolated_workspace_and_cleans_it(tmp_path, mon
             video_path=tmp_path / "video.mp4",
             grid_size=[2, 2],
             frame_interval=6,
+            image_compression="medium",
         )
 
     assert result == ["data:image/jpeg;base64,dGVzdA=="]
     assert Path(captured["frame_dir"]) == tmp_path / "video_tasks" / "task-a" / "frames"
     assert Path(captured["grid_dir"]) == tmp_path / "video_tasks" / "task-a" / "grids"
+    assert captured["image_compression"] == "medium"
     assert not (tmp_path / "video_tasks" / "task-a").exists()

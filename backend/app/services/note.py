@@ -7,7 +7,7 @@ import re
 import shutil
 from dataclasses import asdict
 from pathlib import Path
-from typing import List, Optional, Tuple, Union, Any
+from typing import Callable, List, Optional, Tuple, Union, Any
 
 from fastapi import HTTPException
 from pydantic import HttpUrl
@@ -24,6 +24,7 @@ from app.enmus.task_status_enums import TaskStatus
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
 from app.exceptions.provider import ProviderError
+from app.exceptions.task import TaskCancelled
 from app.gpt.base import GPT
 from app.gpt.gpt_factory import GPTFactory
 from app.models.audio_model import AudioDownloadResult
@@ -101,8 +102,10 @@ class NoteGenerator:
         video_understanding: bool = False,
         video_interval: int = 0,
         grid_size: Optional[List[int]] = None,
+        image_compression: str = "high",
         display_title: Optional[str] = None,
         source_link: Optional[str] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> NoteResult | None:
         """
         主流程：按步骤依次下载、转写、GPT 总结、截图/链接处理、存库、返回 NoteResult。
@@ -122,6 +125,7 @@ class NoteGenerator:
         :param video_understanding: 是否需要视频拼图理解（生成缩略图）
         :param video_interval: 视频帧截取间隔（秒），仅在 video_understanding 为 True 时生效
         :param grid_size: 生成缩略图时的网格大小，如 [3, 3]
+        :param image_compression: 视频理解图片压缩级别：high、medium 或 original
         :param display_title: 面向用户展示的标题；本地缓存文件可使用独立的物理文件名
         :param source_link: 写入笔记的公开来源链接；空字符串表示不展示内部存储地址
         :return: NoteResult 对象，包含 markdown 文本、转写结果和音频元信息
@@ -131,6 +135,7 @@ class NoteGenerator:
 
         try:
             logger.info(f"开始生成笔记 (task_id={task_id})")
+            self._raise_if_cancelled(cancel_check)
             self._update_status(task_id, TaskStatus.PARSING)
 
             # 获取下载器与 GPT 实例
@@ -195,8 +200,10 @@ class NoteGenerator:
                 video_understanding=video_understanding,
                 video_interval=video_interval,
                 grid_size=grid_size,
+                image_compression=image_compression,
                 skip_download=not need_full_download,
             )
+            self._raise_if_cancelled(cancel_check)
             if display_title and display_title.strip():
                 audio_meta.title = display_title.strip()
 
@@ -210,6 +217,7 @@ class NoteGenerator:
                     status_phase=TaskStatus.TRANSCRIBING,
                     task_id=task_id,
                 )
+            self._raise_if_cancelled(cancel_check)
 
             # 3. GPT 总结
             markdown = self._summarize_text(
@@ -223,7 +231,10 @@ class NoteGenerator:
                 style=style,
                 extras=extras,
                 video_img_urls=self.video_img_urls,
+                task_id=task_id,
+                cancel_check=cancel_check,
             )
+            self._raise_if_cancelled(cancel_check)
 
             # 4. 截图 & 链接替换
             if _format:
@@ -241,6 +252,7 @@ class NoteGenerator:
             )
 
             # 5. 保存记录到数据库
+            self._raise_if_cancelled(cancel_check)
             self._update_status(task_id, TaskStatus.SAVING)
             self._save_metadata(video_id=audio_meta.video_id, platform=platform, task_id=task_id)
 
@@ -249,10 +261,19 @@ class NoteGenerator:
             logger.info(f"笔记生成成功 (task_id={task_id})")
             return NoteResult(markdown=markdown, transcript=transcript, audio_meta=audio_meta)
 
+        except TaskCancelled as exc:
+            logger.info("用户取消笔记生成 (task_id=%s)", task_id)
+            self._update_status(task_id, TaskStatus.CANCELED, message=str(exc))
+            return None
         except Exception as exc:
             logger.error(f"生成笔记流程异常 (task_id={task_id})：{exc}", exc_info=True)
             self._update_status(task_id, TaskStatus.FAILED, message=str(exc))
             return None
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_check: Optional[Callable[[], bool]]) -> None:
+        if cancel_check and cancel_check():
+            raise TaskCancelled("用户已取消任务")
 
     @staticmethod
     def delete_note(video_id: str, platform: str) -> int:
@@ -394,6 +415,7 @@ class NoteGenerator:
         video_understanding: bool,
         video_interval: int,
         grid_size: List[int],
+        image_compression: str = "high",
         skip_download: bool = False,
     ) -> AudioDownloadResult | None:
         """
@@ -412,6 +434,7 @@ class NoteGenerator:
         :param video_understanding: 是否需要生成缩略图
         :param video_interval: 视频截帧间隔
         :param grid_size: 缩略图网格尺寸
+        :param image_compression: 视频理解图片压缩级别
         :return: AudioDownloadResult 对象
         """
         self._update_status(task_id, status_phase)
@@ -441,6 +464,7 @@ class NoteGenerator:
                                 video_path=self.video_path,
                                 grid_size=grid_size,
                                 frame_interval=frame_interval,
+                                image_compression=image_compression,
                             )
                         else:
                             logger.info("未指定 grid_size，跳过缩略图生成")
@@ -492,6 +516,7 @@ class NoteGenerator:
                         video_path=self.video_path,
                         grid_size=grid_size,
                         frame_interval=frame_interval,
+                        image_compression=image_compression,
                     )
                 else:
                     logger.info("未指定 grid_size，跳过缩略图生成")
@@ -523,6 +548,7 @@ class NoteGenerator:
         video_path: Path,
         grid_size: List[int],
         frame_interval: int,
+        image_compression: str = "high",
     ) -> List[str]:
         """Extract understanding frames in a task-isolated, disposable workspace."""
         workspace_name = re.sub(r"[^A-Za-z0-9._-]", "_", task_id or "")[:128]
@@ -545,6 +571,7 @@ class NoteGenerator:
                 unit_width=960,
                 unit_height=540,
                 save_quality=80,
+                image_compression=image_compression,
                 frame_dir=str(frame_dir),
                 grid_dir=str(grid_dir),
             ).run()
@@ -665,6 +692,8 @@ class NoteGenerator:
         style: Optional[str],
         extras: Optional[str],
             video_img_urls: List[str],
+        task_id: Optional[str] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> str | None:
         """
         调用 GPT 对转写结果进行总结，生成 Markdown 文本并缓存。
@@ -680,8 +709,9 @@ class NoteGenerator:
         :param extras: GPT 额外参数
         :return: 生成的 Markdown 字符串
         """
-        task_id = markdown_cache_file.stem
-        self._update_status(task_id, TaskStatus.SUMMARIZING)
+        self._raise_if_cancelled(cancel_check)
+        status_task_id = task_id or markdown_cache_file.stem.removesuffix("_markdown")
+        self._update_status(status_task_id, TaskStatus.SUMMARIZING)
 
         source = GPTSource(
             title=audio_meta.title,
@@ -693,7 +723,8 @@ class NoteGenerator:
             _format=formats,
             style=style,
             extras=extras,
-            checkpoint_key=task_id,
+            checkpoint_key=status_task_id,
+            cancel_check=cancel_check,
         )
 
         try:
@@ -703,7 +734,8 @@ class NoteGenerator:
             return markdown
         except Exception as exc:
             logger.error(f"GPT 总结失败：{exc}")
-            self._handle_exception(task_id, exc)
+            if not isinstance(exc, TaskCancelled):
+                self._handle_exception(status_task_id, exc)
             raise
 
     def _post_process_markdown(

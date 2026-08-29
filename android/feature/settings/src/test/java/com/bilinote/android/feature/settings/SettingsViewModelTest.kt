@@ -21,6 +21,10 @@ class SettingsViewModelTest {
     @Before fun setUp() = Dispatchers.setMain(dispatcher)
     @After fun tearDown() = Dispatchers.resetMain()
 
+    @Test fun `first install uses the approved backend URL`() {
+        assertEquals("http://172.21.16.115:8483/", SettingsRepository.DEFAULT_BACKEND_URL)
+    }
+
     @Test fun `rejects empty url without testing connection`() = runTest {
         val tester = FakeConnectionTester()
         val viewModel = SettingsViewModel(FakeSettingsStore(), tester)

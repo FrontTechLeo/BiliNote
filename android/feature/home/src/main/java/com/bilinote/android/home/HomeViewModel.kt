@@ -2,6 +2,7 @@ package com.bilinote.android.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.bilinote.android.core.designsystem.ImageCompressionLevel
 import com.bilinote.android.home.data.TaskRepository
 import com.bilinote.android.network.BiliNoteApi
 import com.bilinote.android.network.dto.GenerateNoteRequest
@@ -116,6 +117,7 @@ data class HomeNoteDraft(
     val videoUnderstanding: Boolean = false,
     val videoInterval: Int = 6,
     val gridSize: List<Int> = listOf(2, 2),
+    val imageCompression: String = ImageCompressionLevel.HIGH.wireValue,
     val localVideo: MultipartBody.Part? = null,
 ) {
     fun toGenerateNoteRequest(videoUrl: String = this.videoUrl): GenerateNoteRequest {
@@ -139,6 +141,7 @@ data class HomeNoteDraft(
             videoUnderstanding = videoUnderstanding,
             videoInterval = videoInterval,
             gridSize = gridSize,
+            imageCompression = ImageCompressionLevel.fromWireValue(imageCompression).wireValue,
         )
     }
 }

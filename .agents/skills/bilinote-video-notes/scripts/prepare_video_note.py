@@ -35,6 +35,13 @@ class InputError(ValueError):
     """Raised when the requested local video input is invalid."""
 
 
+def format_note_filename(video_path: Path | str) -> str:
+    """Return a filesystem-safe Markdown filename derived from a video stem."""
+    stem = re.sub(r"\s+", " ", Path(video_path).stem).strip()
+    stem = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "_", stem).rstrip(" .")
+    return f"{stem or 'video'}.md"
+
+
 def discover_videos(input_path: Path | str) -> list[Path]:
     path = Path(input_path).expanduser().resolve()
     if not path.exists():
@@ -132,7 +139,11 @@ def process_video(
     grids_dir = video_dir / "grids"
     frames_dir.mkdir(exist_ok=True)
     grids_dir.mkdir(exist_ok=True)
-    result: dict[str, Any] = {"video": str(video), "output_dir": str(video_dir)}
+    result: dict[str, Any] = {
+        "video": str(video),
+        "output_dir": str(video_dir),
+        "note_filename": format_note_filename(video),
+    }
 
     try:
         if LocalDownloader is None or WhisperTranscriber is None:

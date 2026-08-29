@@ -11,6 +11,19 @@ prepare_video_note = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(prepare_video_note)
 
 
+@pytest.mark.parametrize(
+    ("video_name", "expected"),
+    [
+        ("06  剪映滤镜与调节操作.mp4", "06 剪映滤镜与调节操作.md"),
+        ("  leading name.mp4", "leading name.md"),
+        ("report:final?.mp4", "report_final_.md"),
+        ("trailing name. .mp4", "trailing name.md"),
+    ],
+)
+def test_formats_note_filename_without_losing_unicode_or_windows_safety(video_name, expected):
+    assert prepare_video_note.format_note_filename(Path(video_name)) == expected
+
+
 def test_discovers_sorted_videos_recursively(tmp_path):
     (tmp_path / "z.MP4").write_bytes(b"z")
     nested = tmp_path / "nested"
@@ -67,7 +80,10 @@ def test_processes_video_with_stubbed_downloader_transcriber_and_reader(tmp_path
 
     result = prepare_video_note.process_video(video, workspace, model="tiny")
     assert result["status"] == "success"
+    assert result["note_filename"] == "clip.md"
     video_dir = workspace / "clip"
+    manifest = json.loads((video_dir / "manifest.json").read_text())
+    assert manifest["note_filename"] == "clip.md"
     assert json.loads((video_dir / "transcript.json").read_text())[
         "full_text"
     ] == "hello"

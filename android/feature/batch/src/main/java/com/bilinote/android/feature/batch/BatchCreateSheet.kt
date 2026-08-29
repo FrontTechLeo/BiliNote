@@ -40,6 +40,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.bilinote.android.core.designsystem.ImageCompressionLevel
+import com.bilinote.android.core.designsystem.ImageCompressionSelector
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
@@ -68,6 +70,7 @@ fun BatchCreateSheet(
     var videoUnderstanding by remember { mutableStateOf(defaultBatchConfig.videoUnderstanding) }
     var videoInterval by remember { mutableStateOf(defaultBatchConfig.videoInterval.toString()) }
     var gridSize by remember { mutableStateOf("2 x 2") }
+    var imageCompression by remember { mutableStateOf(defaultBatchConfig.imageCompression) }
     var formats by remember { mutableStateOf(defaultBatchConfig.format.toSet()) }
     var link by remember { mutableStateOf(defaultBatchConfig.link) }
     var screenshot by remember { mutableStateOf(defaultBatchConfig.screenshot) }
@@ -233,6 +236,11 @@ fun BatchCreateSheet(
                 label = { Text("gridSize，例如 2 x 2") },
                 singleLine = true,
             )
+            ImageCompressionSelector(
+                value = imageCompression,
+                onValueChange = { imageCompression = it },
+                modifier = Modifier.fillMaxWidth(),
+            )
             OutlinedTextField(
                 value = extras,
                 onValueChange = { extras = it },
@@ -286,6 +294,7 @@ fun BatchCreateSheet(
                         videoUnderstanding = videoUnderstanding,
                         videoInterval = videoInterval.toIntOrNull()?.coerceAtLeast(1) ?: defaultBatchConfig.videoInterval,
                         gridSize = grid,
+                        imageCompression = imageCompression,
                         format = formats.toList().filter { it != "screenshot" || videoUnderstanding },
                         linkOverride = formats.contains("link"),
                         screenshotOverride = formats.contains("screenshot") && videoUnderstanding,

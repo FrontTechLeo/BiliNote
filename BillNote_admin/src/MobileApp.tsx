@@ -6,7 +6,8 @@ import {
 } from '@arco-design/web-react/icon'
 import { api, downloadBlob } from './api'
 import MarkdownPreview from './MarkdownPreview'
-import type { Model, Provider, SingleTaskHistory, SingleTaskStatus } from './types'
+import { imageCompressionOptions } from './types'
+import type { ImageCompression, Model, Provider, SingleTaskHistory, SingleTaskStatus } from './types'
 import MobileBatchWorkspace from './mobile/MobileBatchWorkspace'
 
 type MobileTab = 'home' | 'batch' | 'history' | 'settings'
@@ -44,6 +45,7 @@ type MobileDraft = {
   modelName: string
   style: string
   videoUnderstanding: boolean
+  imageCompression: ImageCompression
   formats: string[]
   extras: string
 }
@@ -69,11 +71,11 @@ const styleOptions = [
 ]
 const defaultDraft: MobileDraft = {
   platform: 'bilibili', videoUrl: '', providerId: '', modelName: '', style: 'minimal',
-  videoUnderstanding: false, formats: ['toc', 'summary'], extras: '',
+  videoUnderstanding: false, imageCompression: 'high', formats: ['toc', 'summary'], extras: '',
 }
 const statusLabels: Record<string, string> = {
   PENDING: '排队中', PARSING: '正在解析', DOWNLOADING: '下载视频', TRANSCRIBING: '提取字幕',
-  SUMMARIZING: '整理笔记', FORMATTING: '排版中', SAVING: '保存中', SUCCESS: '已完成', FAILED: '未完成',
+  SUMMARIZING: '整理笔记', FORMATTING: '排版中', SAVING: '保存中', SUCCESS: '已完成', FAILED: '未完成', CANCELED: '已取消',
 }
 const lastReadingStorageKey = 'bilinote-mobile-last-reading-v1'
 
@@ -98,12 +100,13 @@ function displayTime(value?: string) {
 }
 
 function isFinished(status?: string) {
-  return status === 'SUCCESS' || status === 'FAILED'
+  return status === 'SUCCESS' || status === 'FAILED' || status === 'CANCELED'
 }
 
 function statusTone(status?: string) {
   if (status === 'SUCCESS') return 'success'
   if (status === 'FAILED') return 'danger'
+  if (status === 'CANCELED') return 'muted'
   return 'progress'
 }
 
@@ -165,6 +168,7 @@ function NoteComposer({ visible, onClose, providers, models, onCreated }: {
         screenshot: draft.formats.includes('screenshot'),
         extras: draft.extras,
         video_understanding: draft.videoUnderstanding,
+        image_compression: draft.imageCompression,
         video_interval: 6,
         grid_size: [2, 2],
       })
@@ -198,6 +202,7 @@ function NoteComposer({ visible, onClose, providers, models, onCreated }: {
     </section>
     <section className="mobile-compose-section">
       <div className="mobile-setting-row"><div><strong>视频理解</strong><span>根据画面提取关键内容</span></div><Switch checked={draft.videoUnderstanding} onChange={(value) => update({ videoUnderstanding: value })} /></div>
+      {draft.videoUnderstanding && <><label className="mobile-field-label mobile-format-label">画面压缩</label><div className="mobile-segmented">{imageCompressionOptions.map((item) => <button type="button" key={item.value} className={draft.imageCompression === item.value ? 'is-active' : ''} onClick={() => update({ imageCompression: item.value })}>{item.label}</button>)}</div></>}
       <label className="mobile-field-label mobile-format-label">笔记内容</label>
       <ToggleChips value={draft.formats} options={formatOptions.map((item) => ({ ...item, label: item.value === 'screenshot' && !draft.videoUnderstanding ? '关键截图（需开启视频理解）' : item.label }))} onChange={(value) => update({ formats: value.filter((item) => item !== 'screenshot' || draft.videoUnderstanding) })} />
     </section>
@@ -208,21 +213,23 @@ function NoteComposer({ visible, onClose, providers, models, onCreated }: {
   </Drawer>
 }
 
-function HistoryCard({ record, loadingId, onRead, onExport, onRegenerate }: {
+function HistoryCard({ record, loadingId, onRead, onExport, onRegenerate, onCancel }: {
   record: SingleTaskHistory
   loadingId?: string
   onRead: (record: SingleTaskHistory) => void
   onExport: (record: SingleTaskHistory) => void
   onRegenerate: (record: SingleTaskHistory) => void
+  onCancel: (record: SingleTaskHistory) => void
 }) {
   const state = statusTone(record.status)
+  const active = !isFinished(record.status)
   return <article className="mobile-history-card">
     <div className="mobile-history-main" onClick={() => record.has_result && onRead(record)}>
       <div className={`mobile-history-icon ${state}`}><IconFileVideo /></div>
       <div className="mobile-history-content"><strong>{record.title || '未命名 AI 笔记'}</strong><span>{record.platform} · {displayTime(record.created_at)}</span></div>
       <div className={`mobile-status-dot ${state}`} title={statusLabels[record.status] || record.status} />
     </div>
-    {record.has_result ? <div className="mobile-history-actions"><button type="button" onClick={() => onRead(record)} disabled={loadingId === record.task_id}>{loadingId === record.task_id ? '正在打开' : '阅读笔记'}</button><button type="button" onClick={() => onExport(record)}><IconDownload /> 导出</button>{record.can_regenerate && <button type="button" onClick={() => onRegenerate(record)}>重新生成</button>}</div> : record.status === 'FAILED' ? <><div className="mobile-error-summary"><IconExclamationCircleFill /><strong>ERROR</strong><span>处理失败，内容已收起</span></div><div className="mobile-history-actions"><button type="button" disabled>阅读</button><button type="button" disabled><IconDownload /> 导出</button>{record.can_regenerate && <button type="button" onClick={() => onRegenerate(record)} disabled={loadingId === record.task_id}>重试生成</button>}</div></> : <p className="mobile-history-message">{statusLabels[record.status] || '正在处理'}</p>}
+    {record.has_result ? <div className="mobile-history-actions"><button type="button" onClick={() => onRead(record)} disabled={loadingId === record.task_id}>{loadingId === record.task_id ? '正在打开' : '阅读笔记'}</button><button type="button" onClick={() => onExport(record)}><IconDownload /> 导出</button>{record.can_regenerate && <button type="button" onClick={() => onRegenerate(record)}>重新生成</button>}{active && <button type="button" onClick={() => onCancel(record)} disabled={loadingId === record.task_id}>停止</button>}</div> : record.status === 'FAILED' ? <><div className="mobile-error-summary"><IconExclamationCircleFill /><strong>ERROR</strong><span>处理失败，内容已收起</span></div><div className="mobile-history-actions"><button type="button" disabled>阅读</button><button type="button" disabled><IconDownload /> 导出</button>{record.can_regenerate && <button type="button" onClick={() => onRegenerate(record)} disabled={loadingId === record.task_id}>重试生成</button>}</div></> : active ? <div className="mobile-history-actions"><button type="button" disabled>{statusLabels[record.status] || '正在处理'}</button><button type="button" onClick={() => onCancel(record)} disabled={loadingId === record.task_id}>停止</button></div> : <p className="mobile-history-message">{statusLabels[record.status] || '任务已结束'}</p>}
   </article>
 }
 
@@ -241,6 +248,7 @@ export default function MobileApp() {
   const [lastReading, setLastReading] = useState<LastReading | undefined>(loadLastReading)
   const [openingId, setOpeningId] = useState<string>()
   const [regeneratingId, setRegeneratingId] = useState<string>()
+  const [cancellingId, setCancellingId] = useState<string>()
   const lastOpenedTask = useRef<string | undefined>(undefined)
   const readerCache = useRef(new Map<string, ReaderPayload>())
   const pageScroll = useRef<Record<MobileTab, number>>({ home: 0, batch: 0, history: 0, settings: 0 })
@@ -452,6 +460,15 @@ export default function MobileApp() {
       void loadHistory(false)
     } catch (error) { Message.error(error instanceof Error ? error.message : '重新生成失败') } finally { setRegeneratingId(undefined) }
   }
+  const cancel = async (record: SingleTaskHistory) => {
+    try {
+      setCancellingId(record.task_id)
+      await api.post(`/single/tasks/${record.task_id}/cancel`)
+      setTask((current) => current?.task_id === record.task_id ? { ...current, status: 'CANCELED', message: '已请求停止，当前请求结束后生效' } : current)
+      await loadHistory(false)
+      Message.success('已请求停止该任务')
+    } catch (error) { Message.error(error instanceof Error ? error.message : '停止任务失败') } finally { setCancellingId(undefined) }
+  }
   const completed = history.filter((item) => item.status === 'SUCCESS').length
   const closeReader = () => {
     const state = window.history.state as MobileHistoryState | null
@@ -476,11 +493,11 @@ export default function MobileApp() {
         {inProgress && <section className="mobile-task-card"><div className="mobile-task-top"><div className="mobile-task-title"><span className="mobile-pulse"><IconLoading /></span><div><strong>{statusLabels[inProgress.status] || '正在处理'}</strong><span>{inProgress.message || '任务正在准备中'}</span></div></div><Tag color="arcoblue">进行中</Tag></div><div className="mobile-progress-track"><i /></div><button type="button" onClick={() => navigateTab('history')}>查看任务进度 <span>›</span></button></section>}
         {lastReading && <button type="button" className="mobile-continue-card" onClick={() => void continueReading()} disabled={openingId === lastReading.taskId}><span className="mobile-continue-icon"><IconFileVideo /></span><span className="mobile-continue-content"><small>继续阅读 · {lastReading.progress > 0 ? `已读 ${lastReading.progress}%` : '上次阅读'}</small><strong>{lastReading.title}</strong></span><b>{openingId === lastReading.taskId ? <IconLoading /> : '›'}</b></button>}
         <section className="mobile-section"><div className="mobile-section-title"><div><span>最近生成</span><strong>笔记库</strong></div><button type="button" onClick={() => navigateTab('history')}>全部记录 <span>›</span></button></div>
-          {historyLoading ? <div className="mobile-loading-state"><IconLoading /> 正在同步记录</div> : history.filter((item) => item.has_result).slice(0, 3).length ? <div className="mobile-recent-list">{history.filter((item) => item.has_result).slice(0, 3).map((record) => <HistoryCard key={record.task_id} record={record} loadingId={openingId} onRead={(item) => void readHistory(item)} onExport={(item) => void exportTask(item.task_id, item.title)} onRegenerate={(item) => void regenerate(item)} />)}</div> : <div className="mobile-empty-home"><IconRobot /><strong>还没有笔记</strong><span>创建第一篇视频笔记，内容会出现在这里</span></div>}
+          {historyLoading ? <div className="mobile-loading-state"><IconLoading /> 正在同步记录</div> : history.filter((item) => item.has_result).slice(0, 3).length ? <div className="mobile-recent-list">{history.filter((item) => item.has_result).slice(0, 3).map((record) => <HistoryCard key={record.task_id} record={record} loadingId={openingId || cancellingId} onRead={(item) => void readHistory(item)} onExport={(item) => void exportTask(item.task_id, item.title)} onRegenerate={(item) => void regenerate(item)} onCancel={(item) => void cancel(item)} />)}</div> : <div className="mobile-empty-home"><IconRobot /><strong>还没有笔记</strong><span>创建第一篇视频笔记，内容会出现在这里</span></div>}
         </section>
       </>}
       {tab === 'batch' && <MobileBatchWorkspace providers={providers} models={models} onOpenReader={(payload) => openReader({ ...payload, backLabel: payload.backLabel || '合集', returnTab: payload.returnTab || 'batch' })} />}
-      {tab === 'history' && <><header className="mobile-simple-header"><div><span className="mobile-eyebrow">YOUR LIBRARY</span><h1>全部笔记</h1></div><button type="button" className="mobile-header-action" onClick={() => void loadHistory()} aria-label="刷新记录"><IconRefresh /></button></header><div className="mobile-library-stat"><div><strong>{completed}</strong><span>已完成</span></div><div><strong>{history.length}</strong><span>全部任务</span></div><div><strong>{history.filter((item) => !isFinished(item.status)).length}</strong><span>处理中</span></div></div><section className="mobile-history-list">{historyLoading ? <div className="mobile-loading-state"><IconLoading /> 正在同步记录</div> : history.length ? history.map((record) => <HistoryCard key={record.task_id} record={record} loadingId={openingId || regeneratingId} onRead={(item) => void readHistory(item)} onExport={(item) => void exportTask(item.task_id, item.title)} onRegenerate={(item) => void regenerate(item)} />) : <Empty description="暂无笔记记录" />}</section></>}
+      {tab === 'history' && <><header className="mobile-simple-header"><div><span className="mobile-eyebrow">YOUR LIBRARY</span><h1>全部笔记</h1></div><button type="button" className="mobile-header-action" onClick={() => void loadHistory()} aria-label="刷新记录"><IconRefresh /></button></header><div className="mobile-library-stat"><div><strong>{completed}</strong><span>已完成</span></div><div><strong>{history.length}</strong><span>全部任务</span></div><div><strong>{history.filter((item) => !isFinished(item.status)).length}</strong><span>处理中</span></div></div><section className="mobile-history-list">{historyLoading ? <div className="mobile-loading-state"><IconLoading /> 正在同步记录</div> : history.length ? history.map((record) => <HistoryCard key={record.task_id} record={record} loadingId={openingId || regeneratingId || cancellingId} onRead={(item) => void readHistory(item)} onExport={(item) => void exportTask(item.task_id, item.title)} onRegenerate={(item) => void regenerate(item)} onCancel={(item) => void cancel(item)} />) : <Empty description="暂无笔记记录" />}</section></>}
       {tab === 'settings' && <><header className="mobile-simple-header"><div><span className="mobile-eyebrow">MOBILE SETTINGS</span><h1>偏好设置</h1></div></header><section className="mobile-settings-group"><span>当前能力</span><div className="mobile-setting-item"><IconRobot /><div><strong>{providers.filter((item) => item.enabled !== 0).length} 个可用供应商</strong><small>模型配置由管理端统一维护</small></div></div><div className="mobile-setting-item"><IconFileVideo /><div><strong>视频转笔记</strong><small>单视频任务与管理端实时同步</small></div><IconCheckCircleFill className="mobile-ok-icon" /></div></section><section className="mobile-settings-group"><span>管理端</span><button type="button" className="mobile-admin-link" onClick={() => { window.location.href = '/admin/' }}><IconSettings /><div><strong>打开桌面管理控制台</strong><small>配置模型、批量任务与下载设置</small></div><b>›</b></button></section></>}
     </div>
     <nav className="mobile-bottom-nav"><button type="button" className={tab === 'home' ? 'is-active' : ''} onClick={() => navigateTab('home')}><IconHome /><span>首页</span></button><button type="button" className={tab === 'batch' ? 'is-active' : ''} onClick={() => navigateTab('batch')}><IconApps /><span>合集</span></button><button type="button" className={tab === 'history' ? 'is-active' : ''} onClick={() => navigateTab('history')}><IconHistory /><span>笔记库</span></button></nav>

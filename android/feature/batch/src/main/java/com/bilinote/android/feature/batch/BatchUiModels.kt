@@ -8,6 +8,7 @@ import com.bilinote.android.network.dto.BatchPreviewItem as BatchPreviewItemDto
 import com.bilinote.android.network.dto.BatchTask as BatchTaskDto
 import java.util.Locale
 import com.bilinote.android.network.SyncStatus
+import com.bilinote.android.core.designsystem.ImageCompressionLevel
 
 private val DEFAULT_BATCH_FORMAT = listOf("toc", "summary")
 private val DEFAULT_GRID_SIZE = listOf(2, 2)
@@ -24,6 +25,7 @@ data class BatchConfig(
     val videoUnderstanding: Boolean = false,
     val videoInterval: Int = 6,
     val gridSize: List<Int> = DEFAULT_GRID_SIZE,
+    val imageCompression: String = ImageCompressionLevel.HIGH.wireValue,
 ) {
     val link: Boolean get() = linkOverride ?: format.contains("link")
     val screenshot: Boolean
@@ -40,6 +42,7 @@ data class BatchConfig(
         linkOverride = normalizedFormat.contains("link"),
         screenshotOverride = normalizedFormat.contains("screenshot") && videoUnderstanding,
         gridSize = gridSize.takeIf { it.size == 2 } ?: DEFAULT_GRID_SIZE,
+        imageCompression = ImageCompressionLevel.fromWireValue(imageCompression).wireValue,
         )
     }
 }
@@ -239,6 +242,7 @@ internal fun BatchConfig.toDto(): BatchConfigDto {
         videoUnderstanding = normalized.videoUnderstanding,
         videoInterval = normalized.videoInterval,
         gridSize = normalized.gridSize,
+        imageCompression = normalized.imageCompression,
     )
 }
 
@@ -304,6 +308,7 @@ internal fun BatchConfigDto.toUiModel() = BatchConfig(
     videoUnderstanding = videoUnderstanding ?: false,
     videoInterval = videoInterval ?: defaultBatchConfig.videoInterval,
     gridSize = gridSize ?: defaultBatchConfig.gridSize,
+    imageCompression = imageCompression ?: defaultBatchConfig.imageCompression,
 ).normalized()
 
 internal fun BatchItemDto.toUiModel() = BatchItem(

@@ -1,13 +1,20 @@
 package com.bilinote.android.reader
 
+import android.text.Spanned
+import android.widget.TextView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.geometry.Offset
+import androidx.activity.ComponentActivity
+import androidx.compose.ui.test.click
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
+import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.lifecycle.ViewModelStore
 import com.bilinote.android.core.designsystem.BiliNoteTheme
 import com.bilinote.android.database.entity.ReadingProgressEntity
@@ -24,31 +31,51 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.runner.RunWith
+import io.noties.markwon.image.AsyncDrawableSpan
 
+@RunWith(AndroidJUnit4::class)
 class ReaderScreenTest {
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createAndroidComposeRule<ComponentActivity>()
 
     @Test
     fun rendersHeadingAndParagraphFromRealViewModel() {
         val viewModel = viewModelFor("# Heading\n\nA paragraph.")
         setContent(viewModel, WindowWidthSizeClass.Compact)
 
-        composeRule.onNodeWithTag("markdown-heading-1").assertExists()
-        composeRule.onNodeWithTag("markdown-paragraph").assertExists()
+        composeRule.onNodeWithTag("reader-content").assertExists()
+        composeRule.onNodeWithTag("markdown-surface").assertExists()
     }
 
     @Test
-    fun contentTimeLinkCallsCallbackWithSeconds() {
-        var seconds = -1
+    fun rendersRichMarkdownWithoutRawFormattingMarkers() {
+        val markdown = """
+            # Heading
+
+            This is **bold**, *italic*, and `inline code`.
+
+            | Name | Value |
+            | --- | --- |
+            | A | 1 |
+
+            - [x] done
+            - [ ] todo
+        """.trimIndent()
+        setContent(viewModelFor(markdown), WindowWidthSizeClass.Compact)
+
+        composeRule.onNodeWithTag("reader-content").assertExists()
+        composeRule.onNodeWithTag("markdown-surface").assertExists()
+    }
+
+    @Test
+    fun contentTimeLinkIsRenderedByMarkwonSurface() {
         setContent(
             viewModelFor("Watch *Content-[01:23]*"),
             WindowWidthSizeClass.Compact,
-            onOpenTimeLink = { seconds = it },
         )
 
-        composeRule.onNodeWithTag("markdown-time-link-83").assertExists().performClick()
-        assertEquals(83, seconds)
+        composeRule.onNodeWithTag("markdown-surface").assertExists()
     }
 
     @Test
@@ -64,7 +91,7 @@ class ReaderScreenTest {
         )
         setContent(viewModel, WindowWidthSizeClass.Compact)
 
-        composeRule.onNodeWithTag("markdown-heading-1").assertExists()
+        composeRule.onNodeWithTag("markdown-surface").assertExists()
         assertEquals("PENDING", dataSource.refreshedInput?.status)
     }
 
@@ -83,6 +110,39 @@ class ReaderScreenTest {
         }
         composeRule.onNodeWithTag("markdown-image-retry").performClick()
         composeRule.onNodeWithTag("markdown-image-retry").assertExists()
+    }
+
+    @Test
+    fun tappingRenderedImageOpensFullScreenViewer() {
+        setContent(
+            viewModelFor("![Screenshot](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
+            WindowWidthSizeClass.Compact,
+        )
+
+        var tapPoint = Offset.Zero
+        composeRule.waitUntil(5_000) {
+            try {
+                composeRule.runOnIdle {
+                    val textView = composeRule.activity.window.decorView
+                        .findViewWithTag<TextView>("markdown-text-view")
+                    val spanned = textView.text as Spanned
+                    val span = spanned.getSpans(0, spanned.length, AsyncDrawableSpan::class.java).first()
+                    val line = textView.layout.getLineForOffset(spanned.getSpanStart(span))
+                    tapPoint = Offset(
+                        textView.layout.getPrimaryHorizontal(spanned.getSpanStart(span)) + textView.paddingLeft + 2f,
+                        textView.layout.getLineTop(line).toFloat() + textView.paddingTop + 2f,
+                    )
+                }
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        composeRule.onNodeWithTag("markdown-native-scroll").performTouchInput { click(tapPoint) }
+        composeRule.onNodeWithTag("markdown-image-viewer").assertExists()
+        composeRule.onNodeWithTag("markdown-image-viewer-close").performClick()
+        composeRule.onNodeWithTag("markdown-image-viewer").assertDoesNotExist()
     }
 
     @Test

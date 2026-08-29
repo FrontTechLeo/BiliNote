@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -32,6 +33,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
@@ -132,18 +137,18 @@ fun AppNavHost(
     }
     val navigationMode = windowWidthSizeClass.navigationModeLabel()
     val destinations = listOf(
-        primaryDestination(AppDestination.Home.route, "Home", "⌂", selectedRoute, navigationMode) {
+        primaryDestination(AppDestination.Home.route, "首页", "Home", NavigationIcons.Home, selectedRoute, navigationMode) {
             navController.navigateTopLevel(AppDestination.Home.route)
         },
-        primaryDestination(AppDestination.Batch.route, "Batch", "▦", selectedRoute, navigationMode) {
+        primaryDestination(AppDestination.Batch.route, "合集", "Batch", NavigationIcons.Batch, selectedRoute, navigationMode) {
             navController.navigateTopLevel(AppDestination.Batch.route)
         },
-        primaryDestination(AppDestination.Library.route, "Library", "▤", selectedRoute, navigationMode) {
+        primaryDestination(AppDestination.Library.route, "资料库", "Library", NavigationIcons.Library, selectedRoute, navigationMode) {
             navController.navigateTopLevel(AppDestination.Library.route)
         },
-        primaryDestination(AppDestination.Settings.route, "Settings", "⚙", selectedRoute, navigationMode) {
+        primaryDestination(AppDestination.Settings.route, "设置", "Settings", NavigationIcons.Settings, selectedRoute, navigationMode) {
             navController.navigateTopLevel(AppDestination.Settings.route)
-        },
+        }.copy(showInCompactNavigation = false),
     )
 
     val isDetailRoute = currentRoute.startsWith(AppDestination.READER_ROUTE) ||
@@ -469,7 +474,8 @@ private suspend fun exportWhenReady(viewModel: ReaderViewModel) {
 private fun primaryDestination(
     id: String,
     label: String,
-    icon: String,
+    semanticLabel: String,
+    icon: ImageVector,
     selectedRoute: String,
     navigationMode: String,
     onClick: () -> Unit,
@@ -477,10 +483,102 @@ private fun primaryDestination(
     id = id,
     label = label,
     selected = selectedRoute == id,
-    icon = { Text(icon) },
+    icon = { Icon(imageVector = icon, contentDescription = null) },
     onClick = onClick,
-    contentDescription = "$navigationMode:$label",
+    contentDescription = "$navigationMode:$semanticLabel",
 )
+
+private object NavigationIcons {
+    val Home = ImageVector.Builder("Home", 24.dp, 24.dp, 24f, 24f).path(fill = SolidColor(Color.Black)) {
+        moveTo(12f, 5.69f)
+        lineTo(17f, 10.19f)
+        verticalLineTo(18f)
+        horizontalLineTo(15f)
+        verticalLineTo(13f)
+        horizontalLineTo(9f)
+        verticalLineTo(18f)
+        horizontalLineTo(7f)
+        verticalLineTo(10.19f)
+        close()
+    }.build()
+
+    val Batch = ImageVector.Builder("Batch", 24.dp, 24.dp, 24f, 24f).path(fill = SolidColor(Color.Black)) {
+        moveTo(4f, 4f)
+        horizontalLineTo(10f)
+        verticalLineTo(10f)
+        horizontalLineTo(4f)
+        close()
+        moveTo(14f, 4f)
+        horizontalLineTo(20f)
+        verticalLineTo(10f)
+        horizontalLineTo(14f)
+        close()
+        moveTo(4f, 14f)
+        horizontalLineTo(10f)
+        verticalLineTo(20f)
+        horizontalLineTo(4f)
+        close()
+        moveTo(14f, 14f)
+        horizontalLineTo(20f)
+        verticalLineTo(20f)
+        horizontalLineTo(14f)
+        close()
+    }.build()
+
+    val Library = ImageVector.Builder("Library", 24.dp, 24.dp, 24f, 24f).path(fill = SolidColor(Color.Black)) {
+        moveTo(4f, 3f)
+        horizontalLineTo(6f)
+        verticalLineTo(21f)
+        horizontalLineTo(4f)
+        close()
+        moveTo(8f, 3f)
+        horizontalLineTo(14f)
+        verticalLineTo(21f)
+        horizontalLineTo(8f)
+        close()
+        moveTo(16f, 3f)
+        horizontalLineTo(20f)
+        verticalLineTo(21f)
+        horizontalLineTo(16f)
+        close()
+    }.build()
+
+    val Settings = ImageVector.Builder("Settings", 24.dp, 24.dp, 24f, 24f).path(fill = SolidColor(Color.Black)) {
+        moveTo(19.43f, 12.98f)
+        curveTo(19.47f, 12.66f, 19.5f, 12.34f, 19.5f, 12f)
+        curveTo(19.5f, 11.66f, 19.47f, 11.34f, 19.43f, 11.02f)
+        lineTo(21.54f, 9.37f)
+        lineTo(19.54f, 5.91f)
+        lineTo(17.05f, 6.91f)
+        curveTo(16.53f, 6.52f, 15.96f, 6.2f, 15.34f, 5.96f)
+        lineTo(14.96f, 3.32f)
+        horizontalLineTo(10.96f)
+        lineTo(10.58f, 5.96f)
+        curveTo(9.96f, 6.2f, 9.39f, 6.52f, 8.87f, 6.91f)
+        lineTo(6.38f, 5.91f)
+        lineTo(4.38f, 9.37f)
+        lineTo(6.49f, 11.02f)
+        curveTo(6.45f, 11.34f, 6.42f, 11.66f, 6.42f, 12f)
+        curveTo(6.42f, 12.34f, 6.45f, 12.66f, 6.49f, 12.98f)
+        lineTo(4.38f, 14.63f)
+        lineTo(6.38f, 18.09f)
+        lineTo(8.87f, 17.09f)
+        curveTo(9.39f, 17.48f, 9.96f, 17.8f, 10.58f, 18.04f)
+        lineTo(10.96f, 20.68f)
+        horizontalLineTo(14.96f)
+        lineTo(15.34f, 18.04f)
+        curveTo(15.96f, 17.8f, 16.53f, 17.48f, 17.05f, 17.09f)
+        lineTo(19.54f, 18.09f)
+        lineTo(21.54f, 14.63f)
+        close()
+        moveTo(12.96f, 15.5f)
+        curveTo(11.03f, 15.5f, 9.46f, 13.93f, 9.46f, 12f)
+        curveTo(9.46f, 10.07f, 11.03f, 8.5f, 12.96f, 8.5f)
+        curveTo(14.89f, 8.5f, 16.46f, 10.07f, 16.46f, 12f)
+        curveTo(16.46f, 13.93f, 14.89f, 15.5f, 12.96f, 15.5f)
+        close()
+    }.build()
+}
 
 private fun NavHostController.navigateTopLevel(route: String) {
     navigate(route) {

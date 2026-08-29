@@ -34,7 +34,7 @@ Codex 当前 agent
   - 生成图文 Markdown
         |
         v
-任务目录中的 note.md 与资源文件
+任务目录中的格式化视频文件名 `.md` 与资源文件
 ```
 
 不复制项目内部的 Whisper 或视频处理实现，避免模型配置、缓存目录和抽帧行为发生分叉。
@@ -46,7 +46,8 @@ Codex 当前 agent
 ├── SKILL.md
 ├── agents/openai.yaml
 └── scripts/
-    └── prepare_video_note.py
+    ├── prepare_video_note.py
+    └── validate_note_format.py
 ```
 
 `SKILL.md` 只保留触发条件、执行顺序、输入约定、agent 视频理解提示和 Markdown 输出要求；确定性和易出错的文件处理放在脚本中。
@@ -64,7 +65,7 @@ Codex 当前 agent
     │   ├── transcript.txt
     │   ├── frames/frame_*.jpg
     │   ├── grids/grid_*.jpg
-    │   └── note.md
+    │   └── <格式化视频文件名>.md
     └── run.json
 ```
 
@@ -78,14 +79,15 @@ Codex 当前 agent
 4. 复用项目的 `WhisperTranscriber` 和当前 Whisper 配置；脚本允许显式传入模型名，但不新增 API key 或远程模型配置。
 5. 复用 `VideoReader` 生成时间有序的帧图和可供 agent 快速浏览的网格图。抽帧失败时保留转写结果并在 manifest 中记录警告。
 6. 写入 JSON/纯文本转写、帧文件相对路径、视频元数据和运行状态。
-7. skill 指导 agent 读取这些产物，结合转写和图片完成视频理解，直接写出 `note.md`。
-8. 批量输入时每个视频独立产出；单个视频失败不应覆盖其它视频结果，并在顶层 `run.json` 汇总成功、失败和错误原因。
+7. skill 指导 agent 读取这些产物，结合转写和图片完成视频理解，直接写出以原视频文件名为基础格式化后的 `.md` 文档。
+8. agent 写完每个文档后运行 `validate_note_format.py`，检查原生 Markdown 结构、本地图片和禁止的外链/旧 marker；校验失败时先修正文档。
+9. 批量输入时每个视频独立产出；单个视频失败不应覆盖其它视频结果，并在顶层 `run.json` 汇总成功、失败和错误原因。
 
 ## Markdown 产物
 
-每个 `note.md` 至少包含：标题、摘要、章节或时间线、关键观点、事实/术语、行动项或结论（适用时）以及与内容相关的图片。图片优先引用任务目录内的相对路径，例如 `![关键画面](frames/frame_00_30.jpg)` 或网格图；不生成指向项目静态服务或外部 URL 的链接。
+每个格式化后的 `.md` 文档必须与旧工作流产物保持一致：首行为由原视频文件名生成的 `# 视频标题`；随后为 `## 目录`，目录项使用可点击的 Markdown 锚点链接；主体使用 `## 章节名 (mm:ss)*` 的时间戳章节标题，章节下使用 `###` 子标题；视觉内容直接插入本地相对图片，例如 `![](frames/frame_00_00.jpg)*`，不添加 `Screenshot` marker；结尾为 `## AI 总结`。不生成指向项目静态服务或外部 URL 的链接。文件名应保留原视频文件名的可读中文和编号，压缩连续空白并替换 Windows 非法字符。
 
-agent 应避免臆造帧中不可见的内容；无法从转写或画面确认的信息要标注不确定性。图片只用于补充理解，不应把每一帧都塞进 Markdown。
+图片应按操作步骤选择足够密度：每个主要视觉步骤通常至少对应一张能看清操作状态的图片，不能只放少量网格概览图，也不要求把每一帧都塞进 Markdown。agent 应避免臆造帧中不可见的内容；无法从转写或画面确认的信息要标注不确定性。
 
 ## 错误处理与可重复运行
 
@@ -103,6 +105,7 @@ agent 应避免臆造帧中不可见的内容；无法从转写或画面确认�
 - 非法路径、空文件夹和不支持扩展名返回清晰错误。
 - 通过 monkeypatch/stub 验证脚本调用项目 WhisperTranscriber 和 VideoReader，而不是复制实现。
 - 模拟转写失败、抽帧失败和批量部分失败，确认状态汇总和其它任务产物仍保留。
+- 使用格式校验器验证标题、目录锚点、时间戳章节、图片路径和 AI 总结，拒绝不符合旧工作流格式的 Markdown。
 - 运行 skill 结构校验，并验证 `.gitignore` 会忽略 `.bilinote-video-notes/`。
 
 测试生成的媒体、JSON、Markdown 和缓存全部位于 `.bilinote-video-notes/`，不得污染 `backend/note_results`、`backend/static` 或原视频目录。

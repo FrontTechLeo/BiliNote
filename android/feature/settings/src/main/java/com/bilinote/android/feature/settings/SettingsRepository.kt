@@ -100,7 +100,7 @@ class SettingsRepository internal constructor(
     }
 
     private fun mapSettings(preferences: Preferences, migration: MigrationResult): SavedSettings {
-        val backendUrl = preferences[BACKEND_URL].orEmpty()
+        val backendUrl = preferences[BACKEND_URL].orEmpty().ifBlank { DEFAULT_BACKEND_URL }
         val rawToken = preferences[ACCESS_TOKEN] ?: return SavedSettings(backendUrl = backendUrl)
         if (!rawToken.startsWith(TokenCipher.PREFIX)) {
             return SavedSettings(backendUrl = backendUrl, tokenError = (migration as? MigrationResult.Failed)?.message)
@@ -120,6 +120,7 @@ class SettingsRepository internal constructor(
 
     internal companion object {
         const val DATASTORE_FILE = "settings.preferences_pb"
+        const val DEFAULT_BACKEND_URL = "http://172.21.16.115:8483"
         val BACKEND_URL = stringPreferencesKey("backend_url")
         val ACCESS_TOKEN = stringPreferencesKey("access_token")
 

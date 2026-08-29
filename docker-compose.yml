@@ -1,5 +1,20 @@
 
 services:
+  forwarder:
+    container_name: bilinote-forwarder
+    build:
+      context: .
+      dockerfile: forwarder/Dockerfile
+    environment:
+      - FORWARDER_LISTEN_HOST=${FORWARDER_LISTEN_HOST:-0.0.0.0}
+      - FORWARDER_LISTEN_PORT=${FORWARDER_LISTEN_PORT:-3489}
+      - FORWARDER_TARGET_HOST=${FORWARDER_TARGET_HOST:-192.168.137.37}
+      - FORWARDER_TARGET_PORT=${FORWARDER_TARGET_PORT:-3389}
+      - FORWARDER_LOG_LEVEL=${FORWARDER_LOG_LEVEL:-INFO}
+    ports:
+      - "${FORWARDER_LISTEN_PORT:-3489}:${FORWARDER_LISTEN_PORT:-3489}"
+    restart: unless-stopped
+
   backend:
     container_name: bilinote-backend
     build:

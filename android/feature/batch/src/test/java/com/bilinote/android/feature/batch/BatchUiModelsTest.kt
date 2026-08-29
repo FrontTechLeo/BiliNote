@@ -13,6 +13,7 @@ class BatchUiModelsTest {
         assertEquals(6, defaultBatchConfig.videoInterval)
         assertEquals(listOf(2, 2), defaultBatchConfig.gridSize)
         assertEquals(listOf("toc", "summary"), defaultBatchConfig.format)
+        assertEquals("high", defaultBatchConfig.imageCompression)
     }
 
     @Test
@@ -103,5 +104,13 @@ class BatchUiModelsTest {
         assertFalse(normalized.link)
         assertFalse(normalized.screenshot)
         assertEquals(listOf("toc"), normalized.format)
+    }
+
+    @Test
+    fun `image compression is normalized and mapped in both directions`() {
+        assertEquals("medium", BatchConfig(imageCompression = "MEDIUM").normalized().imageCompression)
+        assertEquals("original", BatchConfig(imageCompression = "original").toDto().imageCompression)
+        assertEquals("medium", com.bilinote.android.network.dto.BatchConfig(imageCompression = "medium").toUiModel().imageCompression)
+        assertEquals("high", com.bilinote.android.network.dto.BatchConfig(imageCompression = null).toUiModel().imageCompression)
     }
 }

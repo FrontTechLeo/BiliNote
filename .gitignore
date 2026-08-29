@@ -338,3 +338,11 @@ ffmpg*/
 /android/**/.externalNativeBuild/
 /android/**/captures/
 /android/local.properties
+# Gradle 缓存/用户主目录（项目内 GRADLE_USER_HOME）
+/.gradle-user/
+.gradle/
+.kotlin/
+*.iml
+# Gradle 守护进程与调试产物
+*.hprof
+*.jfr

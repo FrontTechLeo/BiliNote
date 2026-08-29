@@ -163,6 +163,8 @@ git commit -m "feat: prepare local videos for agent notes"
 **Files:**
 - Create: `.agents/skills/bilinote-video-notes/SKILL.md`
 - Create: `.agents/skills/bilinote-video-notes/agents/openai.yaml`
+- Create: `.agents/skills/bilinote-video-notes/scripts/validate_note_format.py`
+- Create: `.agents/skills/bilinote-video-notes/scripts/test_validate_note_format.py`
 
 - [ ] **Step 1: Write the skill workflow**
 
@@ -172,8 +174,11 @@ The frontmatter description must clearly trigger for requests to turn local vide
 2. Run `scripts/prepare_video_note.py` from the repository root.
 3. Read `run.json`, each `manifest.json`, transcript text/JSON, and selected frame/grid images.
 4. Use current agent vision and reasoning for video understanding; never configure or call an extra video/LLM API.
-5. Write one `note.md` per successful video with relative local image links and an honest uncertainty label when evidence is incomplete.
-6. Report successful and failed inputs and the exact output directories.
+5. Write one readable Markdown filename derived from each successful video's stem, with relative local image links and an honest uncertainty label when evidence is incomplete. Match the old workflow artifact format: `# 视频标题`, `## 目录` with clickable anchor links, `## 章节名 (mm:ss)*` main chapters, `###` subsections, direct local images such as `![](frames/frame_00_00.jpg)*`, and `## AI 总结`; do not add `Screenshot` markers.
+6. Select enough images for the operation: normally one representative frame for each major visual step, rather than only a small number of grid overviews. Use a grid only when it is the clearest overview.
+7. Report successful and failed inputs and the exact output directories.
+
+After writing each formatted Markdown document, run `validate_note_format.py` and fix any structural or local-image validation errors before reporting completion.
 
 Document default command, batch behavior, resume behavior, output structure, common failures, and the required Markdown sections without duplicating the full Python implementation.
 
@@ -195,10 +200,10 @@ policy:
 Run the repository skill validator if available; otherwise use the bundled validator:
 
 ```powershell
-python C:\Users\yang\.codex\skills\.system\skill-creator\scripts\quick_validate.py .agents\skills\bilinote-video-notes
+python -X utf8 C:\Users\yang\.codex\skills\.system\skill-creator\scripts\quick_validate.py .agents\skills\bilinote-video-notes
 ```
 
-Expected: valid frontmatter, description, directory structure, and metadata.
+Expected: valid frontmatter, description, directory structure, and metadata. The `-X utf8` switch runs the validator in UTF-8 mode so Chinese headings and instructions are checked without encoding ambiguity.
 
 - [ ] **Step 4: Commit the skill documentation**
 

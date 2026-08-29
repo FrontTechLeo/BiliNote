@@ -36,8 +36,9 @@ logger = get_logger(__name__)
 _IMAGE_REF = re.compile(r'!\[([^\]]*)\]\(/static/screenshots/([^)]+)\)')
 _BV_RE = re.compile(r'BV[0-9A-Za-z]+')
 _VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
-_TERMINAL = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value}
-_BATCH_TERMINAL = {"SUCCESS", "FAILED", "PARTIAL_FAILED"}
+_TERMINAL = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value, TaskStatus.CANCELED.value}
+_BATCH_TERMINAL = {"SUCCESS", "FAILED", "PARTIAL_FAILED", "CANCELED"}
+_BATCH_APPENDABLE = {"PENDING", "RUNNING"} | _BATCH_TERMINAL
 NOTE_OUTPUT_DIR = Path(os.getenv("NOTE_OUTPUT_DIR", "note_results"))
 LOCAL_UPLOAD_ROOT = Path("uploads") / "batch_videos"
 LOCAL_PREVIEW_ROOT = Path("uploads") / "batch_previews"
@@ -132,12 +133,14 @@ class BatchTaskService:
     def __init__(self) -> None:
         self._running: set[str] = set()
         self._lock = threading.Lock()
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._cancel_events_lock = threading.Lock()
         self._resolver = BilibiliCollectionResolver()
 
     @staticmethod
     def _serialize_task(task: BatchTask) -> dict[str, Any]:
         total = task.total_count or 0
-        done = (task.completed_count or 0) + (task.failed_count or 0)
+        done = (task.completed_count or 0) + (task.failed_count or 0) + (task.canceled_count or 0)
         return {
             "id": task.id,
             "title": task.title,
@@ -147,6 +150,7 @@ class BatchTaskService:
             "total_count": total,
             "completed_count": task.completed_count or 0,
             "failed_count": task.failed_count or 0,
+            "canceled_count": task.canceled_count or 0,
             "running_count": task.running_count or 0,
             "progress": round(done / total * 100, 1) if total else 0,
             "created_at": task.created_at.isoformat() if task.created_at else None,
@@ -281,9 +285,9 @@ class BatchTaskService:
                     while chunk := uploaded.file.read(1024 * 1024):
                         output.write(chunk)
                 fingerprint = self._sampled_local_digest(temporary)
-                existing = next(cache_root.glob(f"{fingerprint}.*"), None)
-                target = existing or cache_root / f"{fingerprint}{suffix}"
-                if existing:
+                existing = cache_root / f"{fingerprint}{suffix}"
+                target = existing
+                if existing.is_file():
                     temporary.unlink(missing_ok=True)
                 else:
                     temporary.replace(target)
@@ -330,6 +334,13 @@ class BatchTaskService:
             raise ValueError("本地文件不存在或不在允许的上传目录中")
 
     @staticmethod
+    def _validate_local_video_source(source_url: str) -> None:
+        BatchTaskService._validate_local_source(source_url)
+        target = (Path.cwd() / source_url.lstrip("/")).resolve()
+        if target.suffix.lower() not in _VIDEO_EXTENSIONS:
+            raise ValueError("本地批量任务仅支持视频文件")
+
+    @staticmethod
     def _source_key(platform: str, source_url: str) -> str:
         if platform == "local":
             BatchTaskService._validate_local_source(source_url)
@@ -372,6 +383,8 @@ class BatchTaskService:
                 raise ValueError("视频来源与当前追加方式不一致")
             if not source_url:
                 raise ValueError("视频链接不能为空")
+            if platform == "local":
+                self._validate_local_video_source(source_url)
             key = self._source_key(platform, source_url)
             if key in seen:
                 skipped_count += 1
@@ -409,7 +422,7 @@ class BatchTaskService:
                 source_url = str(raw.get("source_url") or "")
                 platform = str(raw.get("platform") or ("local" if source_type == "local" else "bilibili"))
                 if platform == "local":
-                    self._validate_local_source(source_url)
+                    self._validate_local_video_source(source_url)
                 if not source_url:
                     raise ValueError("视频链接不能为空")
                 db.add(BatchTaskItem(
@@ -455,8 +468,8 @@ class BatchTaskService:
             task = db.get(BatchTask, batch_id)
             if not task:
                 raise KeyError("批量任务不存在")
-            if task.status not in _BATCH_TERMINAL:
-                raise ValueError("只有已结束的批量任务可以追加视频")
+            if task.status not in _BATCH_APPENDABLE:
+                raise ValueError("当前批量任务状态不支持追加视频")
         finally:
             db.close()
 
@@ -469,7 +482,7 @@ class BatchTaskService:
             task = db.get(BatchTask, batch_id)
             if not task:
                 raise KeyError("批量任务不存在")
-            if task.status not in _BATCH_TERMINAL:
+            if task.status not in _BATCH_APPENDABLE:
                 raise ValueError("批量任务状态已变化，请刷新后重试")
             last_position = db.query(BatchTaskItem.position).filter_by(batch_id=batch_id).order_by(BatchTaskItem.position.desc()).first()
             next_position = int(last_position[0] if last_position else 0) + 1
@@ -554,13 +567,19 @@ class BatchTaskService:
         task.total_count = len(items)
         task.completed_count = sum(item.status == TaskStatus.SUCCESS.value for item in items)
         task.failed_count = sum(item.status == TaskStatus.FAILED.value for item in items)
+        task.canceled_count = sum(item.status == TaskStatus.CANCELED.value for item in items)
         task.running_count = sum(item.status not in _TERMINAL | {TaskStatus.PENDING.value} for item in items)
         pending = any(item.status == TaskStatus.PENDING.value for item in items)
         if task.total_count == 0:
             task.status = "SUCCESS"
             task.finished_at = datetime.utcnow()
-        elif task.completed_count + task.failed_count == task.total_count:
-            task.status = "SUCCESS" if task.failed_count == 0 else ("PARTIAL_FAILED" if task.completed_count else "FAILED")
+        elif task.completed_count + task.failed_count + task.canceled_count == task.total_count:
+            if task.canceled_count and not task.completed_count and not task.failed_count:
+                task.status = "CANCELED"
+            elif task.failed_count or task.canceled_count:
+                task.status = "PARTIAL_FAILED" if task.completed_count else "FAILED"
+            else:
+                task.status = "SUCCESS"
             task.finished_at = datetime.utcnow()
         elif task.running_count or pending:
             task.status = "RUNNING" if task.running_count else "PENDING"
@@ -575,6 +594,10 @@ class BatchTaskService:
             item = db.query(BatchTaskItem).filter_by(task_id=task_id).first()
             if not item:
                 return
+            if item.status in _TERMINAL and status != item.status:
+                # A late status update from an in-flight request must not
+                # change a terminal task, especially not resurrect a canceled one.
+                return
             item.status = status
             item.stage = status
             if message:
@@ -584,6 +607,63 @@ class BatchTaskService:
             db.commit()
         finally:
             db.close()
+
+    def _register_cancel_event(self, task_id: str) -> threading.Event:
+        event = threading.Event()
+        with self._cancel_events_lock:
+            self._cancel_events[task_id] = event
+        return event
+
+    def _remove_cancel_event(self, task_id: str) -> None:
+        with self._cancel_events_lock:
+            self._cancel_events.pop(task_id, None)
+
+    def _request_cancel_event(self, task_id: str | None) -> None:
+        if not task_id:
+            return
+        with self._cancel_events_lock:
+            event = self._cancel_events.get(task_id)
+            if event:
+                event.set()
+
+    def _item_is_canceled(self, item_id: str) -> bool:
+        db = SessionLocal()
+        try:
+            item = db.get(BatchTaskItem, item_id)
+            return not item or item.status == TaskStatus.CANCELED.value
+        finally:
+            db.close()
+
+    def cancel_item(self, batch_id: str, item_id: str) -> dict[str, Any]:
+        """Cancel one queued/running child task without deleting its artifacts."""
+        db = SessionLocal()
+        task_id: str | None = None
+        try:
+            item = db.get(BatchTaskItem, item_id)
+            if not item or item.batch_id != batch_id:
+                raise KeyError("子任务不存在")
+            if item.status == TaskStatus.CANCELED.value:
+                return self._serialize_item(item)
+            if item.status in _TERMINAL:
+                raise ValueError("只有排队中或运行中的子任务可以取消")
+
+            task_id = item.task_id
+            item.status = TaskStatus.CANCELED.value
+            item.stage = TaskStatus.CANCELED.value
+            item.message = "用户请求取消，当前请求结束后停止"
+            db.add(BatchTaskEvent(
+                batch_item_id=item.id,
+                status=TaskStatus.CANCELED.value,
+                message=item.message,
+            ))
+            self._refresh_counts(db, batch_id)
+            db.commit()
+            result = self._serialize_item(item)
+        finally:
+            db.close()
+
+        self._request_cancel_event(task_id)
+        return result
 
     def _submit_item(self, item_id: str) -> Any:
         task_id = str(uuid.uuid4())
@@ -622,9 +702,11 @@ class BatchTaskService:
         finally:
             db.close()
 
+        self._register_cancel_event(task_id)
         try:
             future = task_serial_executor.submit(self._run_item, item_id, task_id)
         except Exception as exc:
+            self._remove_cancel_event(task_id)
             logger.exception("批量子任务提交失败: batch=%s item=%s", batch_id, item_id)
             self.sync_child_status(task_id, TaskStatus.FAILED.value, f"任务提交失败：{exc}")
             return None
@@ -633,17 +715,28 @@ class BatchTaskService:
         return future
 
     def _run_item(self, item_id: str, task_id: str) -> None:
-        db = SessionLocal()
+        with self._cancel_events_lock:
+            cancel_event = self._cancel_events.get(task_id)
+
+        def cancel_check() -> bool:
+            return bool(cancel_event and cancel_event.is_set()) or self._item_is_canceled(item_id)
+
         try:
-            item = db.get(BatchTaskItem, item_id)
-            task = db.get(BatchTask, item.batch_id) if item else None
-            if not item or not task:
+            db = SessionLocal()
+            try:
+                item = db.get(BatchTaskItem, item_id)
+                task = db.get(BatchTask, item.batch_id) if item else None
+                if not item or not task:
+                    return
+                source_url, platform = item.source_url, item.platform
+                config = json.loads(task.config_json)
+            finally:
+                db.close()
+
+            if cancel_check():
+                self.sync_child_status(task_id, TaskStatus.CANCELED.value, "用户取消任务")
                 return
-            source_url, platform = item.source_url, item.platform
-            config = json.loads(task.config_json)
-        finally:
-            db.close()
-        try:
+
             from app.services.note import NoteGenerator
 
             quality = DownloadQuality(config.get("quality", DownloadQuality.medium.value))
@@ -654,9 +747,14 @@ class BatchTaskService:
                 _format=config.get("format") or [], style=config.get("style"), extras=config.get("extras"),
                 video_understanding=bool(config.get("video_understanding", False)),
                 video_interval=int(config.get("video_interval") or 0), grid_size=config.get("grid_size") or [],
+                image_compression=config.get("image_compression", "high"),
                 display_title=item.title,
                 source_link="" if platform == "local" else source_url,
+                cancel_check=cancel_check,
             )
+            if cancel_check():
+                self.sync_child_status(task_id, TaskStatus.CANCELED.value, "用户取消任务")
+                return
             if not note or not note.markdown:
                 return
             NOTE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -669,6 +767,8 @@ class BatchTaskService:
         except Exception as exc:
             logger.exception("批量子任务执行失败: %s", exc)
             self.sync_child_status(task_id, TaskStatus.FAILED.value, str(exc))
+        finally:
+            self._remove_cancel_event(task_id)
 
     def _run_batch(self, batch_id: str) -> None:
         futures: set[Any] = set()
@@ -711,12 +811,15 @@ class BatchTaskService:
             item = db.get(BatchTaskItem, item_id)
             if not item or item.batch_id != batch_id:
                 raise KeyError("子任务不存在")
-            if item.status != TaskStatus.FAILED.value:
-                raise ValueError("只有失败的子任务可以重试")
+            if item.status not in {TaskStatus.FAILED.value, TaskStatus.CANCELED.value}:
+                raise ValueError("只有失败或已取消的子任务可以重试")
             item.task_id = None
             item.status = TaskStatus.PENDING.value
             item.stage = TaskStatus.PENDING.value
             item.message = "等待重试"
+            task = db.get(BatchTask, batch_id)
+            if task:
+                task.finished_at = None
             db.add(BatchTaskEvent(batch_item_id=item.id, status=TaskStatus.PENDING.value, message="用户发起重试"))
             self._refresh_counts(db, batch_id)
             db.commit()
@@ -738,6 +841,8 @@ class BatchTaskService:
             NOTE_OUTPUT_DIR / f"{task_id}.status.tmp",
             NOTE_OUTPUT_DIR / f"{task_id}.gpt.checkpoint.json",
             NOTE_OUTPUT_DIR / f"{task_id}.gpt.checkpoint.tmp",
+            NOTE_OUTPUT_DIR / f"{task_id}_markdown.gpt.checkpoint.json",
+            NOTE_OUTPUT_DIR / f"{task_id}_markdown.gpt.checkpoint.tmp",
             NOTE_OUTPUT_DIR / f"{task_id}.tmp",
         ]
 

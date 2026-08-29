@@ -9,7 +9,9 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -17,6 +19,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import com.bilinote.android.core.designsystem.BiliNoteTheme
+import com.bilinote.android.core.designsystem.AdaptiveScaffold
+import com.bilinote.android.core.designsystem.BiliNoteNavigationDestination
 import com.bilinote.android.feature.batch.BatchAppendRequest
 import com.bilinote.android.feature.batch.BatchAppendResult
 import com.bilinote.android.feature.batch.BatchConfig
@@ -38,6 +42,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.junit.Assert.assertEquals
 
 @OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
 class AdaptiveNavigationTest {
@@ -58,11 +63,70 @@ class AdaptiveNavigationTest {
     }
 
     @Test
+    fun compactNavigationUsesIconInsteadOfUnicodeGlyphs() {
+        setContentFor(390.dp, 800.dp)
+
+        composeRule.onAllNodesWithText("⌂", useUnmergedTree = true).assertCountEquals(0)
+        composeRule.onAllNodesWithText("▦", useUnmergedTree = true).assertCountEquals(0)
+        composeRule.onAllNodesWithText("▤", useUnmergedTree = true).assertCountEquals(0)
+        composeRule.onAllNodesWithText("⚙", useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun compactNavigationUsesChineseLabels() {
+        setContentFor(390.dp, 800.dp)
+
+        composeRule.onNodeWithText("首页").assertExists()
+        composeRule.onNodeWithText("合集").assertExists()
+        composeRule.onNodeWithText("资料库").assertExists()
+        composeRule.onAllNodesWithText("设置").assertCountEquals(0)
+    }
+
+    @Test
     fun mediumWidthUsesNavigationRail() {
         setContentFor(800.dp, 800.dp)
 
         composeRule.onNodeWithContentDescription("navigation-rail:Home").assertExists()
         composeRule.onAllNodesWithContentDescription("navigation-bottom:Home").assertCountEquals(0)
+    }
+
+    @Test
+    fun navigationRailTabCentersIconAndLabel() {
+        composeRule.setContent {
+            BiliNoteTheme {
+                Box(Modifier.size(800.dp, 800.dp)) {
+                    AdaptiveScaffold(
+                        windowWidthSizeClass = calculateFromSize(DpSize(800.dp, 800.dp)).widthSizeClass,
+                        destinations = listOf(
+                            BiliNoteNavigationDestination(
+                                id = "home",
+                                label = "Home",
+                                selected = true,
+                                icon = { androidx.compose.material3.Text("ICON") },
+                                onClick = {},
+                                contentDescription = "navigation-rail:Home",
+                            ),
+                        ),
+                    ) { }
+                }
+            }
+        }
+
+        val tabBounds = composeRule
+            .onNodeWithContentDescription("navigation-rail:Home")
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val iconBounds = composeRule
+            .onNodeWithText("ICON", useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val labelBounds = composeRule
+            .onNodeWithText("Home", useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .boundsInRoot
+
+        assertEquals(tabBounds.center.x, iconBounds.center.x, 0.5f)
+        assertEquals(tabBounds.center.x, labelBounds.center.x, 0.5f)
     }
 
     @Test
