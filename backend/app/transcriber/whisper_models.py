@@ -16,7 +16,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from app.utils.logger import get_logger
 
@@ -59,7 +59,13 @@ def hf_cache_dirname(repo_id: str) -> str:
 class WhisperModelRegistry:
     """内置 + 用户自定义的 whisper 模型映射，自定义部分持久化到 JSON。"""
 
-    def __init__(self, filepath: str = "config/whisper_models.json"):
+    def __init__(self, filepath: Optional[str] = None):
+        # 默认落 BILINOTE_DATA_DIR 数据根下的 config 目录；
+        # 历史上这里是相对路径 "config/whisper_models.json"，跟着进程 CWD 走，
+        # 打包桌面端的 CWD 不可控（可能是 System32），会建错位置甚至直接抛权限异常。
+        if filepath is None:
+            from app.utils.runtime_paths import get_config_dir
+            filepath = os.path.join(get_config_dir(), "whisper_models.json")
         self.path = Path(filepath)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 

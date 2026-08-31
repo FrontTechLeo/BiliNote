@@ -28,7 +28,14 @@ def test_audio_file_cannot_be_used_for_video_processing(tmp_path):
         LocalDownloader().download_video(str(source))
 
 
-def test_same_video_conversion_is_serialized_and_reuses_output(tmp_path):
+def test_same_video_conversion_is_serialized_and_reuses_output(tmp_path, monkeypatch):
+    # 默认输出进数据目录的 audio 缓存（避免写用户的源文件夹），且同源路径稳定复用
+    cache_root = tmp_path / "app-data"
+    monkeypatch.setattr(
+        "app.downloaders.local_downloader.get_app_dir",
+        lambda subdir="": str(cache_root / subdir) if subdir else str(cache_root),
+    )
+
     source = tmp_path / "lesson.mp4"
     source.write_bytes(b"video")
     calls = 0
@@ -44,5 +51,7 @@ def test_same_video_conversion_is_serialized_and_reuses_output(tmp_path):
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: LocalDownloader().convert_to_mp3(str(source)), range(2)))
 
-    assert results == [str(tmp_path / "lesson.mp3")] * 2
+    assert results[0] == results[1]
+    assert "audio" in results[0].replace("\\", "/")
+    assert results[0].endswith("lesson.mp3")
     assert calls == 1

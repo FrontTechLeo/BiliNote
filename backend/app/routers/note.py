@@ -24,6 +24,7 @@ from app.services.task_serial_executor import task_serial_executor
 from app.services.single_task_history_service import single_task_history_service
 from app.services.task_cancellation import task_cancellation_registry
 from app.utils.response import ResponseWrapper as R
+from app.utils.runtime_paths import get_note_output_dir, get_uploads_dir, is_filesystem_absolute
 from app.utils.url_parser import extract_video_id
 from app.utils.video_reader import DEFAULT_IMAGE_COMPRESSION, normalize_image_compression
 from app.validators.video_url_validator import is_supported_video_url
@@ -82,8 +83,8 @@ class VideoRequest(BaseModel):
         return normalize_image_compression(v)
 
 
-NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
-UPLOAD_DIR = "uploads"
+NOTE_OUTPUT_DIR = get_note_output_dir()
+UPLOAD_DIR = get_uploads_dir()
 
 
 def save_note_to_file(task_id: str, note):
@@ -206,6 +207,52 @@ async def upload(file: UploadFile = File(...)):
     return R.success({"url": f"/uploads/{file.filename}"})
 
 
+class LocalInspectRequest(BaseModel):
+    paths: list[str]
+
+
+_VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
+
+
+@router.post("/local/inspect")
+def local_inspect(data: LocalInspectRequest):
+    """PC 客户端直读模式：检查本地文件元信息（大小/时长/是否可用），零上传。"""
+    from app.utils.runtime_paths import local_path_input_enabled
+
+    if not local_path_input_enabled():
+        return R.error(msg="服务端未启用本地路径输入", code=400)
+    items = []
+    for raw in data.paths[:500]:
+        raw = str(raw or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        entry: dict = {
+            "path": str(path),
+            "title": path.stem,
+            "exists": False,
+            "is_video": False,
+            "size_bytes": None,
+            "duration_seconds": None,
+        }
+        try:
+            entry["exists"] = path.is_file()
+            if entry["exists"]:
+                entry["is_video"] = path.suffix.lower() in _VIDEO_SUFFIXES
+                entry["size_bytes"] = path.stat().st_size
+                if entry["is_video"]:
+                    import ffmpeg
+                    try:
+                        probe = ffmpeg.probe(str(path))
+                        entry["duration_seconds"] = round(float(probe["format"]["duration"]), 2)
+                    except Exception:
+                        pass  # ffprobe 不可用/文件损坏时不阻断导入，转写阶段会给出真实错误
+        except OSError as exc:
+            entry["error"] = str(exc)
+        items.append(entry)
+    return R.success({"items": items})
+
+
 @router.post("/generate_note")
 def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
     try:
@@ -313,8 +360,14 @@ def regenerate_single_task(task_id: str, background_tasks: BackgroundTasks):
     if not request_data:
         return R.error(msg="该历史任务缺少原始生成配置，无法重新生成", code=400404)
     source_url = str(request_data.get("video_url") or "")
-    if source_url.startswith("/uploads/") and not (Path.cwd() / source_url.lstrip("/")).is_file():
-        return R.error(msg="原本地视频文件已不存在，无法重新生成", code=400410)
+    if source_url.startswith("/uploads/"):
+        from app.utils.runtime_paths import get_uploads_dir
+        if not (Path(get_uploads_dir()) / source_url[len("/uploads/"):]).is_file():
+            return R.error(msg="原本地视频文件已不存在，无法重新生成", code=400410)
+    elif is_filesystem_absolute(source_url):
+        # PC 客户端直读模式记录的是磁盘绝对路径
+        if not Path(source_url).is_file():
+            return R.error(msg="原本地视频文件已不存在，无法重新生成", code=400410)
 
     payload = {
         key: value

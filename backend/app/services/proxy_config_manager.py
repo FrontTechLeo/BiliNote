@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from app.utils.runtime_paths import get_config_dir
+
 
 class ProxyConfigManager:
     """全局代理配置，存 JSON 文件，支持前端动态修改。
@@ -12,8 +14,8 @@ class ProxyConfigManager:
     这样桌面端/web 用户在设置页填，docker/服务器部署用环境变量兜底。
     """
 
-    def __init__(self, filepath: str = "config/proxy.json"):
-        self.path = Path(filepath)
+    def __init__(self, filepath: Optional[str] = None):
+        self.path = Path(filepath) if filepath else Path(get_config_dir(), "proxy.json")
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def _read(self) -> Dict[str, Any]:

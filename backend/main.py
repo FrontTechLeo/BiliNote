@@ -12,27 +12,53 @@ from dotenv import load_dotenv
 # stdout 设为行缓冲，避免控制台日志卡住不刷新
 sys.stdout.reconfigure(line_buffering=True)
 
+load_dotenv()
+
+# ---- 必须在导入任何 app 模块之前完成的环境准备 ----
+# 1) 桌面端内置模式（BILINOTE_DATA_DIR 注入）默认走 hf-mirror 镜像下载 whisper 模型：
+#    huggingface_hub 在 import 时读取 HF_ENDPOINT，必须先设；Dockerfile 同款做法。
+#    用户显式设置过 HF_ENDPOINT 时不覆盖。
+if os.getenv("BILINOTE_DATA_DIR"):
+    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+# 2) CUDA 加速包目录（exe 同级 cuda\，可选）：桌面端打包版不带 torch，
+#    GPU 转写靠这里的 cuBLAS/cuDNN。在 ctranslate2 被加载前注册才生效。
+from app.utils.runtime_paths import get_cuda_dll_dir  # noqa: E402  (runtime_paths 无重依赖)
+
+_cuda_dll_dir = get_cuda_dll_dir()
+if _cuda_dll_dir:
+    try:
+        os.add_dll_directory(_cuda_dll_dir)
+        os.environ["PATH"] = _cuda_dll_dir + os.pathsep + os.environ.get("PATH", "")
+        print(f"[cuda] 已加载 CUDA 加速包: {_cuda_dll_dir}")
+    except OSError:
+        pass
+
 from app.db.init_db import init_db
 from app.db.provider_dao import seed_default_providers
 from app.exceptions.exception_handlers import register_exception_handlers
 # from app.db.model_dao import init_model_table
 # from app.db.provider_dao import init_provider_table
 from app.utils.logger import get_logger
+from app.utils.runtime_paths import (
+    get_screenshots_dir,
+    get_static_root,
+    get_uploads_dir,
+)
 from app import create_app
 from app.services.transcriber_config_manager import TranscriberConfigManager
 from events import register_handler
 from ffmpeg_helper import ensure_ffmpeg_or_raise
 
 logger = get_logger(__name__)
-load_dotenv()
 
-# 读取 .env 中的路径
+# 路径解析：显式 env > BILINOTE_DATA_DIR 数据根 > 历史默认（见 runtime_paths.py）
 static_path = os.getenv('STATIC', '/static')
-out_dir = os.getenv('OUT_DIR', './static/screenshots')
+out_dir = get_screenshots_dir()
 
 # 自动创建本地目录（static 和 static/screenshots）
-static_dir = "static"
-uploads_dir = "uploads"
+static_dir = get_static_root()
+uploads_dir = get_uploads_dir()
 if not os.path.exists(static_dir):
     os.makedirs(static_dir)
 if not os.path.exists(uploads_dir):

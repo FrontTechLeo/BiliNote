@@ -1,33 +1,21 @@
 import os
-import sys
-from pathlib import Path
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+from app.utils.runtime_paths import get_media_data_dir, get_models_base_dir
 
 
 def get_data_dir():
-    if getattr(sys, 'frozen', False):
-
-        base_dir = os.path.dirname(sys.executable)
-    else:
-
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data"))
-
-    data_path = os.path.join(base_dir, "data")
+    """下载器缓存（视频等）目录，历史上是 backend/data；打包后是 exe 同级 data。"""
+    data_path = get_media_data_dir()
     os.makedirs(data_path, exist_ok=True)
     return data_path
 
 
 def get_model_dir(subdir: str = "whisper") -> str:
-    # 判断是否为打包状态（PyInstaller）
-    if getattr(sys, 'frozen', False):
-        # exe 执行，放在 APPDATA 或 ~/.cache 下
-        base_dir = os.path.join(os.getenv("APPDATA") or str(Path.home()), "BiliNote", "models")
-    else:
-        # 开发时，相对项目根目录
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../models"))
-
-    path = os.path.join(base_dir, subdir)
+    """
+    本地转写模型目录。优先级：
+    BILINOTE_MODELS_DIR > BILINOTE_DATA_DIR/models > frozen 旧位置(APPDATA) > 开发目录
+    """
+    path = os.path.join(get_models_base_dir(), subdir)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -35,16 +23,12 @@ def get_model_dir(subdir: str = "whisper") -> str:
 def get_app_dir(subdir: str = "") -> str:
     """
     返回一个稳定的可写目录：
+    - 设置 BILINOTE_DATA_DIR 时：数据根/data/<subdir>
     - 开发时：使用项目 data 目录
     - 打包后：使用 exe 所在目录
     """
-    if getattr(sys, 'frozen', False):
-        # 打包后运行：使用 main.exe 所在目录
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        # 开发模式：使用项目的 /data 目录
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data"))
-
-    full_path = os.path.join(base_dir, subdir)
+    full_path = get_media_data_dir()
+    if subdir:
+        full_path = os.path.join(full_path, subdir)
     os.makedirs(full_path, exist_ok=True)
     return full_path

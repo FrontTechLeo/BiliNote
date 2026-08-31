@@ -12,6 +12,10 @@ BACKEND_PORT= os.getenv("BACKEND_PORT", 8483)
 BACKEND_BASE_URL = f"{api_path}:{BACKEND_PORT}"
 
 from typing import Optional
+
+from app.utils.runtime_paths import get_static_root
+
+
 def generate_screenshot(video_path: str, output_dir: str, timestamp: int, index: int) -> str:
     """
     使用 ffmpeg 生成截图，返回生成图片路径
@@ -49,11 +53,8 @@ def save_cover_to_static(local_cover_path: str, subfolder: Optional[str] = "cove
     :param subfolder: 子目录，默认是 cover，可以自定义
     :return: 前端访问路径，例如 /static/cover/xxx.jpg
     """
-    # 项目根目录
-    project_root = os.getcwd()
-
     # static目录
-    static_dir = os.path.join(project_root, "static")
+    static_dir = get_static_root()
 
     # 确定目标子目录
     target_dir = os.path.join(static_dir, subfolder or "cover")

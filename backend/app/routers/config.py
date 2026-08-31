@@ -73,6 +73,8 @@ def get_transcriber_config():
         "whisper_builtin_models": BUILTIN_WHISPER_MODELS,
         "whisper_custom_models": registry.get_custom_models(),
         "mlx_whisper_available": MLX_WHISPER_AVAILABLE,
+        # 模型落盘目录：给前端展示「模型目录」并支持手动拷贝迁移
+        "model_dir": get_model_dir("whisper"),
     })
 
 
@@ -114,6 +116,14 @@ def update_transcriber_config(data: TranscriberConfigRequest):
         transcriber_type=data.transcriber_type,
         whisper_model_size=data.whisper_model_size,
     )
+    # 转写器是进程内单例：配置变更后必须失效，下一次任务才用新引擎/新模型重建，
+    # 否则用户在设置页切换模型后仍会一直用旧模型（直到重启进程）。
+    try:
+        from app.transcriber import transcriber_provider
+        transcriber_provider._transcribers[transcriber_provider.TranscriberType.FAST_WHISPER] = None
+        transcriber_provider._transcribers[transcriber_provider.TranscriberType.MLX_WHISPER] = None
+    except Exception as e:
+        logger.warning(f"重置转写器单例失败（不影响已保存配置）: {e}")
     return R.success(data=config)
 
 
@@ -353,6 +363,74 @@ def download_transcriber_model(data: ModelDownloadRequest, background_tasks: Bac
     return R.success(msg="模型下载已开始")
 
 
+class LocalModelImportRequest(BaseModel):
+    path: str  # 本地 faster-whisper 模型目录（须含 model.bin）
+    name: Optional[str] = None  # 展示名称，默认从目录名推导
+
+
+def _pretty_model_name_from_dir(path: Path) -> str:
+    """从目录名推导展示名：HF cache 目录 models--Org--Name → Org/Name。"""
+    folder = path.name
+    if folder.startswith("models--"):
+        parts = folder.split("--")
+        if len(parts) >= 3:
+            return parts[1] + "/" + "-".join(parts[2:])
+    return folder
+
+
+@router.post("/transcriber/import_local_model")
+def import_local_whisper_model(data: LocalModelImportRequest):
+    """把本地已有的 faster-whisper 模型目录注册为自定义模型（零拷贝）。
+
+    用于桌面端「模型迁移」：把之前 web/docker/开发环境下载好的模型目录
+    （HF snapshot 目录或裸模型目录）直接登记，不用重新下载几个 GB。
+    支持两种目录形态：
+      - 裸模型目录：根下直接有 model.bin
+      - HF cache 目录 models--Org--Name：自动定位 snapshots/<hash>/model.bin
+    """
+    from app.transcriber.whisper_models import get_registry
+    from app.utils.runtime_paths import is_filesystem_absolute
+
+    raw = (data.path or "").strip()
+    if not raw:
+        return R.error(msg="请选择模型目录")
+    if not is_filesystem_absolute(raw):
+        return R.error(msg="请选择绝对路径下的模型目录")
+    model_path = Path(raw)
+    if not model_path.is_dir():
+        return R.error(msg="目录不存在")
+
+    target = model_path
+    if not (target / "model.bin").exists():
+        # HF cache 布局：找 snapshots/*/model.bin
+        snapshots = target / "snapshots"
+        found = None
+        if snapshots.is_dir():
+            for snapshot in snapshots.iterdir():
+                if (snapshot / "model.bin").exists():
+                    found = snapshot
+                    break
+        if not found:
+            return R.error(msg="该目录不是完整的 faster-whisper 模型目录（缺少 model.bin）")
+        target = found
+
+    name = (data.name or "").strip() or _pretty_model_name_from_dir(model_path)
+    try:
+        custom = get_registry().add_custom_model(name, str(target))
+    except ValueError as e:
+        return R.error(msg=str(e))
+    return R.success(data={"custom": custom, "name": name, "target": str(target)},
+                     msg=f"已导入本地模型「{name}」")
+
+
+@router.delete("/transcriber/custom_model/{name}")
+def remove_local_whisper_model(name: str):
+    """移除自定义模型映射（不删除磁盘上的模型文件）。"""
+    from app.transcriber.whisper_models import get_registry
+    custom = get_registry().remove_custom_model(name)
+    return R.success(data={"custom": custom}, msg="已移除该模型登记")
+
+
 @router.get("/sys_health")
 async def sys_health():
     """结构化健康状态——任何子项异常都不应让整个 endpoint 5xx。
@@ -421,19 +499,30 @@ async def deploy_status():
     """
     import os
 
-    # CUDA 状态
+    # CUDA 状态：torch 缺失时（桌面端打包版）退回 ctranslate2 探测，
+    # 并区分「驱动可见」与「推理就绪」（后者需要 cuBLAS/cuDNN 运行库）
     try:
-        import torch
-        cuda_available = torch.cuda.is_available()
+        from app.utils.env_checker import (
+            cuda_backend,
+            cuda_inference_ready,
+            gpu_name,
+            is_cuda_available,
+            is_torch_installed,
+        )
+        available = is_cuda_available()
         cuda_info = {
-            "available": cuda_available,
-            "torch_installed": True,
-            "version": torch.version.cuda if cuda_available else None,
-            "gpu_name": torch.cuda.get_device_name(0) if cuda_available else None,
+            "available": available,
+            "inference_ready": cuda_inference_ready() if available else False,
+            "detect_backend": cuda_backend() or None,
+            "torch_installed": is_torch_installed(),
+            "version": None,
+            "gpu_name": gpu_name() if available else None,
         }
     except Exception:
         cuda_info = {
             "available": False,
+            "inference_ready": False,
+            "detect_backend": None,
             "torch_installed": False,
             "version": None,
             "gpu_name": None,

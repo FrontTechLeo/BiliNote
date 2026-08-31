@@ -30,6 +30,13 @@ from app.services.cookie_manager import CookieConfigManager
 from app.services.task_serial_executor import task_serial_executor
 from app.utils.logger import get_logger
 from app.utils.note_helper import remove_internal_local_source_link
+from app.utils.runtime_paths import (
+    get_note_output_dir,
+    get_screenshots_dir,
+    get_uploads_dir,
+    is_filesystem_absolute,
+    local_path_input_enabled,
+)
 
 logger = get_logger(__name__)
 
@@ -39,10 +46,21 @@ _VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v"}
 _TERMINAL = {TaskStatus.SUCCESS.value, TaskStatus.FAILED.value, TaskStatus.CANCELED.value}
 _BATCH_TERMINAL = {"SUCCESS", "FAILED", "PARTIAL_FAILED", "CANCELED"}
 _BATCH_APPENDABLE = {"PENDING", "RUNNING"} | _BATCH_TERMINAL
-NOTE_OUTPUT_DIR = Path(os.getenv("NOTE_OUTPUT_DIR", "note_results"))
-LOCAL_UPLOAD_ROOT = Path("uploads") / "batch_videos"
-LOCAL_PREVIEW_ROOT = Path("uploads") / "batch_previews"
+NOTE_OUTPUT_DIR = Path(get_note_output_dir())
+_UPLOADS_BASE = Path(get_uploads_dir())
+LOCAL_UPLOAD_ROOT = _UPLOADS_BASE / "batch_videos"
+LOCAL_PREVIEW_ROOT = _UPLOADS_BASE / "batch_previews"
 LOCAL_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+
+
+def _resolve_local_source_path(source_url: str) -> Path:
+    """把 ``/uploads/...`` 形式的 URL 解析为文件系统路径；磁盘绝对路径原样返回。"""
+    if source_url.startswith("/uploads/"):
+        return Path(get_uploads_dir()) / source_url[len("/uploads/"):]
+    if is_filesystem_absolute(source_url):
+        return Path(source_url)
+    # 其他形式维持历史行为：按 cwd 相对处理
+    return Path.cwd() / source_url.lstrip("/")
 
 
 class BilibiliCollectionResolver:
@@ -231,15 +249,15 @@ class BatchTaskService:
         cutoff = time.time() - max(0, max_age_seconds)
         removed_files = 0
         removed_dirs = 0
-        cache_root = (Path.cwd() / LOCAL_UPLOAD_ROOT).resolve()
+        cache_root = LOCAL_UPLOAD_ROOT.resolve()
         if cache_root.exists():
             for path in cache_root.iterdir():
-                source_url = "/" + path.relative_to(Path.cwd()).as_posix()
+                source_url = self._upload_url(path)
                 if path.is_file() and source_url not in referenced and path.stat().st_mtime < cutoff:
                     path.unlink(missing_ok=True)
                     removed_files += 1
 
-        preview_root = (Path.cwd() / LOCAL_PREVIEW_ROOT).resolve()
+        preview_root = LOCAL_PREVIEW_ROOT.resolve()
         if preview_root.exists():
             for directory in preview_root.iterdir():
                 if not directory.is_dir():
@@ -247,7 +265,7 @@ class BatchTaskService:
                 for path in directory.rglob("*"):
                     if not path.is_file():
                         continue
-                    source_url = "/" + path.relative_to(Path.cwd()).as_posix()
+                    source_url = self._upload_url(path)
                     if source_url not in referenced and path.stat().st_mtime < cutoff:
                         path.unlink(missing_ok=True)
                         removed_files += 1
@@ -257,6 +275,82 @@ class BatchTaskService:
         if removed_files or removed_dirs:
             logger.info("已清理本地批量视频孤儿缓存: files=%s preview_dirs=%s", removed_files, removed_dirs)
         return {"removed_files": removed_files, "removed_dirs": removed_dirs}
+
+    @staticmethod
+    def _upload_url(path: Path) -> str:
+        """把上传缓存目录内的文件转成 /uploads/... 形式的对外 URL。"""
+        try:
+            rel = Path(path).resolve().relative_to(_UPLOADS_BASE.resolve()).as_posix()
+        except (ValueError, OSError):
+            rel = Path(path).as_posix()
+        return "/uploads/" + rel
+
+    def store_local_paths_preview(self, paths: list[str]) -> dict[str, Any]:
+        """PC 客户端直读模式：直接扫描本地磁盘上的文件/文件夹，零上传。
+
+        返回结构与 store_local_preview 一致，但 source_url 是原始绝对路径，
+        处理时由 LocalDownloader 直接读盘，不做内容拷贝。
+        """
+        if not local_path_input_enabled():
+            raise ValueError("服务端未启用本地路径输入")
+        self.cleanup_local_upload_cache()
+        files = self._discover_local_video_files([str(p) for p in paths if str(p).strip()])
+        if not files:
+            raise ValueError("所选路径中没有可处理的视频文件")
+        items: list[dict[str, Any]] = []
+        discovered_count = 0
+        duplicate_count = 0
+        seen_digests: set[str] = set()
+        for file_path in sorted(files, key=lambda p: self._natural_sort_key(p.name)):
+            discovered_count += 1
+            digest = self._sampled_local_digest(file_path)
+            key = f"local-sampled:{digest}"
+            if key in seen_digests:
+                duplicate_count += 1
+                continue
+            seen_digests.add(key)
+            items.append({
+                "title": file_path.stem,
+                "source_url": str(file_path),
+                "platform": "local",
+                "position": len(items) + 1,
+            })
+        return {
+            "preview_id": str(uuid.uuid4()),
+            "title": "本地视频",
+            "items": items,
+            "discovered_count": discovered_count,
+            "duplicate_count": duplicate_count,
+        }
+
+    def preview_append_local_paths(self, batch_id: str, paths: list[str]) -> dict[str, Any]:
+        preview = self.store_local_paths_preview(paths)
+        items, skipped_count = self._filter_new_items(batch_id, preview["items"], "local")
+        return {
+            **preview,
+            "items": items,
+            "skipped_count": skipped_count + int(preview.get("duplicate_count") or 0),
+        }
+
+    @staticmethod
+    def _discover_local_video_files(paths: list[str]) -> list[Path]:
+        """把用户给的文件/文件夹路径展开为去重后的视频文件列表（递归 + 自然排序由调用方处理）。"""
+        found: dict[str, Path] = {}
+        for raw in paths:
+            candidate = Path(raw).expanduser()
+            try:
+                if candidate.is_dir():
+                    matches = [p for p in candidate.rglob("*") if p.is_file() and p.suffix.lower() in _VIDEO_EXTENSIONS]
+                elif candidate.is_file() and candidate.suffix.lower() in _VIDEO_EXTENSIONS:
+                    matches = [candidate]
+                else:
+                    continue
+            except OSError:
+                continue
+            for match in matches:
+                resolved = match.resolve()
+                found[str(resolved).lower()] = resolved
+        return list(found.values())
 
     def store_local_preview(self, files: Iterable[Any]) -> dict[str, Any]:
         self.cleanup_local_upload_cache()
@@ -325,18 +419,23 @@ class BatchTaskService:
 
     @staticmethod
     def _validate_local_source(source_url: str) -> None:
-        allowed_roots = [
-            (Path.cwd() / LOCAL_UPLOAD_ROOT).resolve(),
-            (Path.cwd() / LOCAL_PREVIEW_ROOT).resolve(),
-        ]
-        target = (Path.cwd() / source_url.lstrip("/")).resolve()
+        if is_filesystem_absolute(source_url):
+            # PC 客户端直读模式：允许绝对路径，但需要显式开关，且文件必须存在。
+            # 原始文件永远不删，这里只做存在性校验。
+            if not local_path_input_enabled():
+                raise ValueError("服务端未启用本地路径输入")
+            if not Path(source_url).is_file():
+                raise ValueError("本地文件不存在")
+            return
+        allowed_roots = [LOCAL_UPLOAD_ROOT.resolve(), LOCAL_PREVIEW_ROOT.resolve()]
+        target = _resolve_local_source_path(source_url).resolve()
         if not any(base in target.parents for base in allowed_roots) or not target.is_file():
             raise ValueError("本地文件不存在或不在允许的上传目录中")
 
     @staticmethod
     def _validate_local_video_source(source_url: str) -> None:
         BatchTaskService._validate_local_source(source_url)
-        target = (Path.cwd() / source_url.lstrip("/")).resolve()
+        target = _resolve_local_source_path(source_url)
         if target.suffix.lower() not in _VIDEO_EXTENSIONS:
             raise ValueError("本地批量任务仅支持视频文件")
 
@@ -344,7 +443,7 @@ class BatchTaskService:
     def _source_key(platform: str, source_url: str) -> str:
         if platform == "local":
             BatchTaskService._validate_local_source(source_url)
-            target = (Path.cwd() / source_url.lstrip("/")).resolve()
+            target = _resolve_local_source_path(source_url)
             if target.parent.name == LOCAL_UPLOAD_ROOT.name and re.fullmatch(r"[0-9a-f]{64}", target.stem):
                 return f"local-sampled:{target.stem}"
             return f"local-sampled:{BatchTaskService._sampled_local_digest(target)}"
@@ -879,7 +978,7 @@ class BatchTaskService:
                     remaining_images.update(Path(match.group(2)).name for match in _IMAGE_REF.finditer(markdown))
                 except (OSError, ValueError, TypeError):
                     continue
-        screenshot_root = (Path.cwd() / "static" / "screenshots").resolve()
+        screenshot_root = Path(get_screenshots_dir()).resolve()
         for image_name in image_names - remaining_images:
             target = (screenshot_root / image_name).resolve()
             if screenshot_root in target.parents and target.is_file():
@@ -904,12 +1003,9 @@ class BatchTaskService:
                         request_references.add(str(source))
                 except (OSError, ValueError, TypeError):
                     continue
-        allowed_roots = [
-            (Path.cwd() / LOCAL_UPLOAD_ROOT).resolve(),
-            (Path.cwd() / LOCAL_PREVIEW_ROOT).resolve(),
-        ]
+        allowed_roots = [LOCAL_UPLOAD_ROOT.resolve(), LOCAL_PREVIEW_ROOT.resolve()]
         for source_url in set(local_sources) - referenced_sources - request_references:
-            target = (Path.cwd() / source_url.lstrip("/")).resolve()
+            target = _resolve_local_source_path(source_url).resolve()
             if any(root in target.parents for root in allowed_roots) and target.is_file():
                 target.unlink(missing_ok=True)
                 removed_files += 1

@@ -70,7 +70,7 @@ def get_mlx_whisper_transcriber(model_size="base"):
     return _init_transcriber(TranscriberType.MLX_WHISPER, MLXWhisperTranscriber, model_size=model_size)
 
 # 通用入口
-def get_transcriber(transcriber_type="fast-whisper", model_size="base", device="cuda"):
+def get_transcriber(transcriber_type="fast-whisper", model_size=None, device="cuda"):
     """
     获取指定类型的转录器实例
 
@@ -90,7 +90,9 @@ def get_transcriber(transcriber_type="fast-whisper", model_size="base", device="
         logger.warning(f'未知转录器类型 "{transcriber_type}"，默认使用 fast-whisper')
         transcriber_enum = TranscriberType.FAST_WHISPER
 
-    whisper_model_size = os.environ.get("WHISPER_MODEL_SIZE", model_size)
+    # 优先级：调用方显式值（来自配置文件）> WHISPER_MODEL_SIZE env（docker/.env 默认）> tiny
+    # 此前 env 永远压过配置文件，导致前端切了模型仍用 .env 里的旧档位。
+    whisper_model_size = model_size or os.environ.get("WHISPER_MODEL_SIZE", "tiny")
 
     if transcriber_enum == TranscriberType.FAST_WHISPER:
         return get_whisper_transcriber(whisper_model_size, device=device)

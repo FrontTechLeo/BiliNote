@@ -65,6 +65,10 @@ class BatchDeleteItemsRequest(BaseModel):
     item_ids: list[str]
 
 
+class LocalPathsPreviewRequest(BaseModel):
+    paths: list[str]
+
+
 @router.post("/batch/preview/bilibili")
 def preview_bilibili(data: BatchPreviewRequest):
     try:
@@ -77,6 +81,15 @@ def preview_bilibili(data: BatchPreviewRequest):
 def preview_local(files: list[UploadFile] = File(...)):
     try:
         return R.success(batch_task_service.store_local_preview(files))
+    except Exception as exc:
+        return R.error(msg=str(exc))
+
+
+@router.post("/batch/preview/local_paths")
+def preview_local_paths(data: LocalPathsPreviewRequest):
+    """PC 客户端直读模式：直接扫描本地磁盘文件/文件夹，零上传。"""
+    try:
+        return R.success(batch_task_service.store_local_paths_preview(data.paths))
     except Exception as exc:
         return R.error(msg=str(exc))
 
@@ -120,6 +133,17 @@ def preview_append_bilibili(batch_id: str, data: BatchPreviewRequest):
 def preview_append_local(batch_id: str, files: list[UploadFile] = File(...)):
     try:
         return R.success(batch_task_service.preview_append_local(batch_id, files))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
+@router.post("/batch/tasks/{batch_id}/preview/local_paths")
+def preview_append_local_paths(batch_id: str, data: LocalPathsPreviewRequest):
+    """PC 客户端直读模式：向已有批量任务追加本地磁盘视频。"""
+    try:
+        return R.success(batch_task_service.preview_append_local_paths(batch_id, data.paths))
     except KeyError as exc:
         return R.error(msg=str(exc), code=404)
     except ValueError as exc:

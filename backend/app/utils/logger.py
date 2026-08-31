@@ -2,9 +2,11 @@ import logging
 import sys
 from pathlib import Path
 
+from app.utils.runtime_paths import get_logs_dir
+
 # 日志目录
-LOG_DIR = Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = Path(get_logs_dir())
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # 日志格式
 formatter = logging.Formatter(

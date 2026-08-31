@@ -1,3 +1,4 @@
+import hashlib
 import os
 import subprocess
 import threading
@@ -9,6 +10,8 @@ from app.downloaders.base import Downloader
 from app.enmus.note_enums import DownloadQuality
 from app.models.audio_model import AudioDownloadResult
 
+from app.utils.path_helper import get_app_dir
+from app.utils.runtime_paths import get_uploads_dir
 from app.utils.video_helper import save_cover_to_static
 
 
@@ -27,9 +30,8 @@ class LocalDownloader(Downloader, ABC):
 
     @staticmethod
     def _resolve_local_path(video_url: str) -> str:
-        if video_url.startswith('/uploads'):
-            project_root = os.getcwd()
-            video_url = os.path.join(project_root, video_url.lstrip('/'))
+        if video_url.startswith('/uploads/'):
+            video_url = os.path.join(get_uploads_dir(), video_url[len('/uploads/'):])
         return os.path.normpath(video_url)
 
     @staticmethod
@@ -82,19 +84,20 @@ class LocalDownloader(Downloader, ABC):
             except subprocess.CalledProcessError as e:
                 raise RuntimeError(f"提取封面失败: {output_path}") from e
 
-    def convert_to_mp3(self,input_path: str, output_path: str = None) -> str:
+    def convert_to_mp3(self, input_path: str, output_path: str = None) -> str:
         """
         将本地视频文件转为 MP3 音频文件
         :param input_path: 输入文件路径（如 .mp4）
-        :param output_path: 输出文件路径（可选，默认同目录同名 .mp3）
+        :param output_path: 输出文件路径（可选，默认放到数据目录的 audio 缓存，避免写用户的源文件夹）
         :return: 生成的 mp3 文件路径
         """
         if not os.path.exists(input_path):
             raise FileNotFoundError(f"输入文件不存在: {input_path}")
 
         if output_path is None:
-            base, _ = os.path.splitext(input_path)
-            output_path = base + ".mp3"
+            digest = hashlib.md5(_path_key(input_path).encode("utf-8")).hexdigest()[:8]
+            cache_dir = get_app_dir(os.path.join("audio", digest))
+            output_path = os.path.join(cache_dir, os.path.splitext(os.path.basename(input_path))[0] + ".mp3")
 
         if _path_key(input_path) == _path_key(output_path):
             if os.path.splitext(input_path)[1].lower() == ".mp3":
@@ -165,7 +168,10 @@ class LocalDownloader(Downloader, ABC):
             cover_url = None
         else:
             file_path = self.convert_to_mp3(video_url)
-            cover_path = self.extract_cover(video_url)
+            # 封面提到数据目录的 cover 缓存里，避免往用户的源视频文件夹写文件；
+            # 按源路径哈希分目录，防止同名视频封面互相覆盖。
+            digest = hashlib.md5(_path_key(video_url).encode("utf-8")).hexdigest()[:8]
+            cover_path = self.extract_cover(video_url, output_dir=get_app_dir(os.path.join("covers", digest)))
             cover_url = save_cover_to_static(cover_path)
 
         print('file——path',file_path)

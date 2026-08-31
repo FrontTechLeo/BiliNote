@@ -8,10 +8,11 @@ import os
 from typing import Optional
 
 from app.utils.logger import get_logger
+from app.utils.runtime_paths import get_note_output_dir
 
 logger = get_logger(__name__)
 
-NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
+NOTE_OUTPUT_DIR = get_note_output_dir()
 
 
 def _load_note_data(task_id: str) -> Optional[dict]:

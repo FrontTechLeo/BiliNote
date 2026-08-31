@@ -8,7 +8,7 @@ from app.transcriber.whisper_models import (
     is_local_target,
     hf_cache_dirname,
 )
-from app.utils.env_checker import is_cuda_available, is_torch_installed
+from app.utils.env_checker import cuda_inference_ready, is_cuda_available
 from app.utils.logger import get_logger
 from app.utils.path_helper import get_model_dir
 
@@ -105,48 +105,54 @@ class WhisperTranscriber(Transcriber):
 
     @staticmethod
     def is_cuda() -> bool:
+        # 设备选择看「推理就绪」而不是只看驱动：桌面端打包版没有 torch，
+        # 但 ctranslate2 也能探测 GPU；缺 cuBLAS/cuDNN 运行库时老实用 CPU。
         try:
-            if is_cuda_available():
-                print(" CUDA 可用，使用 GPU")
+            if is_cuda_available() and cuda_inference_ready():
+                logger.info("CUDA 可用，使用 GPU 转写")
                 return True
-            elif is_torch_installed():
-                print(" 只装了 torch，但没有 CUDA，用 CPU")
-                return False
-            else:
-                print(" 还没有安装 torch，请先安装")
-                return False
-
-        except ImportError:
+            if is_cuda_available():
+                logger.info("检测到 GPU 但缺少 CUDA 运行库（cuBLAS/cuDNN），使用 CPU 转写")
+            return False
+        except Exception:
             return False
 
     @timeit
     def transcript(self, file_path: str) -> TranscriptResult:
         try:
-
-            segments_raw, info = self.model.transcribe(file_path)
-
-            segments = []
-            full_text = ""
-
-            for seg in segments_raw:
-                text = seg.text.strip()
-                full_text += text + " "
-                segments.append(TranscriptSegment(
-                    start=seg.start,
-                    end=seg.end,
-                    text=text
-                ))
-
-            result= TranscriptResult(
-                language=info.language,
-                full_text=full_text.strip(),
-                segments=segments,
-                raw=info
-            )
-            # self.on_finish(file_path, result)
-            return result
+            return self._transcribe(file_path)
         except Exception as e:
-            print(f"转写失败：{e}")
+            # GPU 推理失败（驱动/运行库/显存问题）自动降级 CPU 重建一次，
+            # 不能让整条笔记任务直接死掉——CPU 慢但能出结果。
+            if self.device != "cuda":
+                raise
+            logger.warning(f"CUDA 转写失败（{e}），降级 CPU 重试")
+            self.device = "cpu"
+            self.compute_type = "int8"
+            self.model = self._build_model(self.model_size, get_model_dir("whisper"))
+            return self._transcribe(file_path)
+
+    def _transcribe(self, file_path: str) -> TranscriptResult:
+        segments_raw, info = self.model.transcribe(file_path)
+
+        segments = []
+        full_text = ""
+
+        for seg in segments_raw:
+            text = seg.text.strip()
+            full_text += text + " "
+            segments.append(TranscriptSegment(
+                start=seg.start,
+                end=seg.end,
+                text=text
+            ))
+
+        return TranscriptResult(
+            language=info.language,
+            full_text=full_text.strip(),
+            segments=segments,
+            raw=info
+        )
 
 
     def on_finish(self,video_path:str,result: TranscriptResult)->None:

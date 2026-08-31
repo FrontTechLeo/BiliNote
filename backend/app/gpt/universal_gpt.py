@@ -3,6 +3,7 @@ import logging
 from app.gpt.base import GPT
 from app.gpt.prompt_builder import generate_base_prompt
 from app.models.gpt_model import GPTSource
+from app.utils.runtime_paths import get_note_output_dir
 import os
 import hashlib
 import json
@@ -35,7 +36,7 @@ class UniversalGPT(GPT):
         # 留出图片 Base64 编码和供应商单图限制的余量，避免本地分块器
         # 允许一个请求通过，但 OpenRouter 在下载图片时返回 413。
         self.max_request_bytes = int(os.getenv("OPENAI_MAX_REQUEST_BYTES", str(24 * 1024 * 1024)))
-        self.checkpoint_dir = Path(os.getenv("NOTE_OUTPUT_DIR", "note_results"))
+        self.checkpoint_dir = Path(get_note_output_dir())
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         # 初始化时缓存重试配置，避免每次请求重复读取环境变量
         self._max_retry_attempts = max(1, int(os.getenv("OPENAI_RETRY_ATTEMPTS", "3")))

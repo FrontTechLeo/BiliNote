@@ -65,6 +65,11 @@ def _install_stubs():
         return name
 
     path_helper_mod.get_app_dir = _get_app_dir
+    # 补齐真实 path_helper 的其余公开函数，避免残缺 stub 污染同进程内
+    # 后续导入 app.routers.config 等模块的测试（此前缺 get_model_dir 导致 ImportError）。
+    path_helper_mod.get_model_dir = lambda subdir="": _get_app_dir(subdir)
+    path_helper_mod.get_media_data_dir = lambda: _get_app_dir("data")
+    path_helper_mod.get_models_base_dir = lambda: _get_app_dir("models")
     ffmpeg_mod.probe = lambda *_args, **_kwargs: {"format": {"duration": "0"}}
 
     sys.modules.setdefault("app", app_mod)

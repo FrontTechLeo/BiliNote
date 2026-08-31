@@ -346,3 +346,17 @@ ffmpg*/
 # Gradle 守护进程与调试产物
 *.hprof
 *.jfr
+
+# BiliNote desktop client
+/desktop/src-tauri/bin/
+/desktop/src-tauri/target/
+/desktop/src-tauri/Cargo.lock
+/desktop/dist/
+/desktop/node_modules/
+/backend/build/
+/desktop/dist-portable/
+
+# Whisper 模型权重（体积巨大，不纳入版本控制）
+/backend/tests/models/whisper/**/model.bin
+/backend/tests/models/whisper/**/blobs/
+/backend/tests/models/whisper/**/*.incomplete

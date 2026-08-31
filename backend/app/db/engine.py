@@ -3,10 +3,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
+from app.utils.runtime_paths import get_database_url
+
 load_dotenv()
 
-# 默认 SQLite，如果想换 PostgreSQL 或 MySQL，可以直接改 .env
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///bili_note.db")
+# 默认 SQLite（文件随 BILINOTE_DATA_DIR 数据根迁移），可换 PostgreSQL/MySQL
+DATABASE_URL = get_database_url()
 
 # SQLite 需要特定连接参数，其他数据库不需要
 engine_args = {}

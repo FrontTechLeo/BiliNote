@@ -12,9 +12,10 @@ from typing import Any
 from app.db.engine import SessionLocal
 from app.db.models.video_tasks import BatchTaskItem, VideoTask
 from app.enmus.task_status_enums import TaskStatus
+from app.utils.runtime_paths import get_note_output_dir
 
 
-NOTE_OUTPUT_DIR = Path(os.getenv("NOTE_OUTPUT_DIR", "note_results"))
+NOTE_OUTPUT_DIR = Path(get_note_output_dir())
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9-]+$")
 _SCREENSHOT_REF_RE = re.compile(r"!\[[^\]]*\]\(/static/screenshots/([^)]+)\)")
 _RAW_SCREENSHOT_RE = re.compile(r"\*?Screenshot-(?:\[\d{2}:\d{2}\]|\d{2}:\d{2})")
