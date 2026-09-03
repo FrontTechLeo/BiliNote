@@ -59,8 +59,15 @@ def delete_model(model_id: int):
 def get_all_models():
     db = next(get_db())
     try:
-        # 只查询启用状态供应商的模型
-        models = db.query(Model).join(Provider, Model.provider_id == Provider.id).filter(Provider.enabled == 1).all()
+        # 配置管理接口：返回全部模型，口径与 get_all_providers() 保持一致。
+        #
+        # 之前这里用 inner join + filter(Provider.enabled == 1) 过滤掉「未启用供应商」的模型，
+        # 但 /get_all_providers 返回的是全部供应商（含未启用的）。两个接口口径不一致，
+        # 前端「选供应商 → 过滤该供应商的模型」时就出现：供应商能选中，模型列表却永远是空的，
+        # 表现为下拉点选后没有任何选中态。可用性判断应交给调用方按 enabled 处理。
+        #
+        # 改用 outerjoin：供应商被删除后其模型仍可见（避免静默丢失），由管理界面负责清理。
+        models = db.query(Model).outerjoin(Provider, Model.provider_id == Provider.id).all()
         return [
             {"id": m.id, "provider_id": m.provider_id, "model_name": m.model_name}
             for m in models

@@ -40,9 +40,51 @@ export function saveBlob(blob: Blob, filename: string) {
 // ---------- 类型 ----------
 
 // 供应商 id 可能是数字（全新库）或字符串（历史库如 'openai'），统一原样传递不强转
-export type Provider = { id: number | string; name: string; type: string; base_url: string }
+// enabled 可能缺失（旧版本接口），缺省按「启用」处理
+export type Provider = {
+  id: number | string
+  name: string
+  type: string
+  base_url: string
+  enabled?: number | null
+}
+
+/**
+ * 供应商是否可用于生成任务。
+ * enabled 缺省或为 1 视为可用；显式为 0 视为禁用。
+ */
+export function isProviderEnabled(provider: Provider): boolean {
+  const enabled = provider.enabled
+  return enabled === undefined || enabled === null || Number(enabled) !== 0
+}
 
 export type Model = { id: number | string; model_name: string; provider_id: number | string }
+
+/**
+ * 把 id / provider_id 归一化成字符串再比较。
+ *
+ * models.provider_id 在 SQLite 里被声明为 INTEGER，纯数字 id 会被存成整型，
+ * 而 providers.id 是字符串；同时 <option value> 经 DOM 取回后恒为字符串。
+ * 不做归一化就会出现「同一个值，比较不相等」，导致 select 匹配不到任何 option、
+ * 选中态丢失（下拉仍停在 placeholder）。
+ */
+export function sameId(a: number | string | null | undefined, b: number | string | null | undefined): boolean {
+  return String(a ?? '') === String(b ?? '')
+}
+
+// 供应商远端模型（OpenAI 兼容 /v1/models 返回条目）
+export type RemoteModel = { id: string; owned_by?: string; object?: string }
+
+/**
+ * 实时拉取供应商在远端可用的模型列表 —— 对齐 admin 的处理方式：
+ * GET /model_list/{provider_id}，后端走 OpenAI SDK list_models。
+ * 手打名称容易写出远端不存在的模型，连通性测试与生成都会失败；
+ * 后端异常时该接口返回 []，这里统一归一成数组。
+ */
+export async function fetchProviderModels(providerId: number | string): Promise<RemoteModel[]> {
+  const data = await api.get<{ models?: RemoteModel[] }>(`/model_list/${providerId}`)
+  return Array.isArray(data) ? [] : (data.models ?? [])
+}
 
 export type SingleTaskStatus = {
   task_id: string

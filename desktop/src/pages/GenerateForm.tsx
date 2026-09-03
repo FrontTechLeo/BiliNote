@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { api, formats, imageCompressionOptions, styles } from '../api'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { api, formats, imageCompressionOptions, isProviderEnabled, sameId, styles } from '../api'
 import type { Model, Provider } from '../api'
 import { Checkbox, Field } from '../ui'
 
@@ -44,31 +44,78 @@ export function ModelFields({ providerId, modelName, onChange, providers, models
   providers: Provider[]
   models: Model[]
 }) {
-  const modelOptions = models.filter((model) => String(model.provider_id) === String(providerId))
+  // 父级传的是内联箭头函数，每次渲染引用都变；用 ref 兜住最新值，
+  // 避免下面的校正 effect 被无意义地反复触发。
+  const onChangeRef = useRef(onChange)
+  useEffect(() => { onChangeRef.current = onChange }, [onChange])
+
+  // 归一化后比较：models.provider_id 在 SQLite 中是 INTEGER affinity，
+  // 纯数字 id 会被存成整型，而 providers.id 是字符串，DOM 取回的又恒为字符串。
+  const modelOptions = useMemo(
+    () => models.filter((model) => sameId(model.provider_id, providerId)),
+    [models, providerId],
+  )
+
+  // 生成任务只能走已启用的供应商；当前已选中的即使被禁用也保留，
+  // 否则回显历史配置时该 option 不存在，select 会掉回 placeholder。
+  const providerOptions = useMemo(
+    () => providers.filter((provider) => isProviderEnabled(provider) || sameId(provider.id, providerId)),
+    [providers, providerId],
+  )
+
+  // 供应商已被删除时，value 会匹配不到任何 option，同样回落到未选中。
+  const providerValue = providerOptions.some((provider) => sameId(provider.id, providerId))
+    ? String(providerId)
+    : ''
+
+  // 模型 option 用 id（唯一）而不是 model_name 作为 value：
+  // 同一供应商下若存在同名模型，用 model_name 会让原生 select 命中错误项，
+  // 表现为「点了这一项，勾却跳到另一项 / 干脆没有选中态」。
+  const selectedModel = modelOptions.find((model) => model.model_name === modelName)
+
+  // 切换供应商、供应商被删、或回显的配置已失效时，清掉不属于当前供应商的幽灵 modelName，
+  // 避免提交一个张冠李戴的模型。数据未加载完时不误清。
+  useEffect(() => {
+    if (!modelName) return
+    if (modelOptions.length === 0) return
+    if (!modelOptions.some((model) => model.model_name === modelName)) {
+      onChangeRef.current({ modelName: '' })
+    }
+  }, [modelOptions, modelName])
+
+  const noModelHint = providerValue && modelOptions.length === 0
+    ? '该供应商下还没有模型，请到「设置 → AI 模型」添加'
+    : undefined
+
   return (
     <>
       <Field label="模型供应商" required>
         <select
           className="input"
-          value={providerId}
-          onChange={(event) => onChange({ providerId: event.target.value || '', modelName: '' })}
+          value={providerValue}
+          onChange={(event) => onChange({ providerId: event.target.value, modelName: '' })}
         >
           <option value="">选择供应商</option>
-          {providers.map((provider) => (
-            <option key={provider.id} value={provider.id}>{provider.name}</option>
+          {providerOptions.map((provider) => (
+            <option key={String(provider.id)} value={String(provider.id)}>
+              {provider.name}{isProviderEnabled(provider) ? '' : '（已禁用）'}
+            </option>
           ))}
         </select>
       </Field>
-      <Field label="AI 模型" required>
+      <Field label="AI 模型" required hint={noModelHint}>
         <select
           className="input"
-          value={modelName}
-          disabled={!providerId}
-          onChange={(event) => onChange({ modelName: event.target.value })}
+          value={selectedModel ? String(selectedModel.id) : ''}
+          disabled={!providerValue}
+          onChange={(event) => {
+            const picked = modelOptions.find((model) => String(model.id) === event.target.value)
+            onChange({ modelName: picked ? picked.model_name : '' })
+          }}
         >
-          <option value="">{providerId ? '选择模型' : '先选择供应商'}</option>
+          <option value="">{providerValue ? '选择模型' : '先选择供应商'}</option>
           {modelOptions.map((model) => (
-            <option key={model.id} value={model.model_name}>{model.model_name}</option>
+            <option key={String(model.id)} value={String(model.id)}>{model.model_name}</option>
           ))}
         </select>
       </Field>

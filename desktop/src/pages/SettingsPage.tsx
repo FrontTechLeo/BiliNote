@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api } from '../api'
+import { api, fetchProviderModels, isProviderEnabled, sameId } from '../api'
+import type { Model, Provider, RemoteModel } from '../api'
 import { backendInfo, desktop, type DesktopSettings } from '../ipc'
 import { EmptyState, Field, useConfirm, useToast } from '../ui'
-
-type Provider = { id: number; name: string; type: string; base_url: string }
-type Model = { id: number; model_name: string; provider_id: number }
 
 type TabKey = 'models' | 'transcriber' | 'downloader' | 'service'
 
@@ -49,8 +47,15 @@ function ModelsTab() {
   const [type, setType] = useState('openai')
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
-  const [modelName, setModelName] = useState('')
   const [modelProviderId, setModelProviderId] = useState<number | string | ''>('')
+  // 对齐 admin 的 openai 类模型处理：先实时拉取供应商远端模型列表，
+  // 搜索选择后再保存启用；拉取失败时保留手动输入兜底
+  const [remoteModels, setRemoteModels] = useState<RemoteModel[]>([])
+  const [remoteLoading, setRemoteLoading] = useState(false)
+  const [remoteError, setRemoteError] = useState<string | null>(null)
+  const [modelSearch, setModelSearch] = useState('')
+  const [pickedModel, setPickedModel] = useState('')
+  const [manualModel, setManualModel] = useState('')
 
   const refresh = useCallback(async () => {
     try {
@@ -66,6 +71,34 @@ function ModelsTab() {
 
   useEffect(() => { void refresh() }, [refresh])
 
+  const loadRemoteModels = useCallback(async () => {
+    if (!modelProviderId) return
+    setRemoteLoading(true)
+    setRemoteError(null)
+    try {
+      const list = await fetchProviderModels(modelProviderId)
+      setRemoteModels(list)
+      if (list.length === 0) setRemoteError('未获取到远端模型列表（供应商可能不支持在线列表或连通失败），可手动输入模型名')
+    } catch (error) {
+      setRemoteModels([])
+      setRemoteError(error instanceof Error ? error.message : '获取模型列表失败，可手动输入模型名')
+    } finally {
+      setRemoteLoading(false)
+    }
+  }, [modelProviderId])
+
+  // 切换供应商即自动拉取（与 admin 的 ModelSelector 行为一致）
+  useEffect(() => {
+    setRemoteModels([]); setPickedModel(''); setModelSearch(''); setRemoteError(null)
+    if (modelProviderId) void loadRemoteModels()
+  }, [modelProviderId, loadRemoteModels])
+
+  const filteredRemoteModels = remoteModels.filter((model) => {
+    const keywords = modelSearch.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    const target = (model.id || '').toLowerCase()
+    return keywords.every((kw) => target.includes(kw))
+  })
+
   const addProvider = async () => {
     if (!name.trim() || !baseUrl.trim() || !apiKey.trim()) { toast('warn', '请完整填写名称、API 地址与 Key'); return }
     try {
@@ -78,12 +111,17 @@ function ModelsTab() {
     }
   }
 
-  const addModel = async () => {
-    if (!modelProviderId || !modelName.trim()) { toast('warn', '请选择供应商并填写模型名'); return }
+  const addModel = async (modelName: string) => {
+    const trimmed = modelName.trim()
+    if (!modelProviderId || !trimmed) { toast('warn', '请选择供应商并选择/填写模型名'); return }
+    if (models.some((model) => sameId(model.provider_id, modelProviderId) && model.model_name === trimmed)) {
+      toast('warn', '该模型已在列表中')
+      return
+    }
     try {
-      await api.post('/models', { provider_id: modelProviderId, model_name: modelName.trim() })
+      await api.post('/models', { provider_id: modelProviderId, model_name: trimmed })
       toast('ok', '模型已添加')
-      setModelName('')
+      setPickedModel(''); setManualModel('')
       void refresh()
     } catch (error) {
       toast('bad', error instanceof Error ? error.message : '添加失败')
@@ -130,13 +168,18 @@ function ModelsTab() {
         <div className="section-title">已配置供应商</div>
         {providers.length === 0 ? <EmptyState title="暂无供应商" hint="先添加一个 LLM 供应商" /> : (
           <table className="table">
-            <thead><tr><th>名称</th><th>类型</th><th>接口地址</th><th>模型数</th><th className="right">操作</th></tr></thead>
+            <thead><tr><th>名称</th><th>类型</th><th>状态</th><th>接口地址</th><th>模型数</th><th className="right">操作</th></tr></thead>
             <tbody>
               {providers.map((provider) => (
-                <tr key={provider.id}>
+                <tr key={String(provider.id)}>
                   <td>{provider.name}</td><td><span className="pill">{provider.type}</span></td>
+                  <td>
+                    <span className={`status-tag ${isProviderEnabled(provider) ? 'ok' : 'dim'}`}>
+                      {isProviderEnabled(provider) ? '启用' : '禁用'}
+                    </span>
+                  </td>
                   <td className="ellipsis dim">{provider.base_url}</td>
-                  <td>{models.filter((model) => String(model.provider_id) === String(provider.id)).length}</td>
+                  <td>{models.filter((model) => sameId(model.provider_id, provider.id)).length}</td>
                   <td className="right actions"><button type="button" className="btn text" onClick={() => void testProvider(provider)}>连通性测试</button></td>
                 </tr>
               ))}
@@ -147,22 +190,51 @@ function ModelsTab() {
 
       <section className="card">
         <div className="section-title">模型列表</div>
+        {/* 对齐 admin 在 openai 类供应商上的处理：先选供应商，实时拉取其
+            OpenAI 兼容远端模型列表，搜索选择后保存启用；手打名称容易写出
+            远端不存在的模型，导致连通性测试与生成阶段才报错。 */}
         <div className="row">
-          <select className="input" value={modelProviderId} onChange={(event) => setModelProviderId(event.target.value || '')}>
+          {/* value 与 option value 统一用 String 归一化，避免 number/string 不匹配时
+              选中项匹配不到 option、下拉停回 placeholder（表现为「点了没选中」） */}
+          <select className="input" value={String(modelProviderId ?? '')} onChange={(event) => setModelProviderId(event.target.value)}>
             <option value="">选择供应商</option>
-            {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
+            {providers.map((provider) => (
+              <option key={String(provider.id)} value={String(provider.id)}>
+                {provider.name}{isProviderEnabled(provider) ? '' : '（已禁用）'}
+              </option>
+            ))}
           </select>
-          <input className="input" value={modelName} onChange={(event) => setModelName(event.target.value)} placeholder="模型名称" />
-          <button type="button" className="btn primary" onClick={() => void addModel()}>添加模型</button>
+          <button type="button" className="btn" disabled={!modelProviderId || remoteLoading} onClick={() => void loadRemoteModels()}>
+            {remoteLoading ? '获取中...' : '刷新模型列表'}
+          </button>
         </div>
+        {remoteError && <p className="dim small-text warn-text">{remoteError}</p>}
+        {modelProviderId && remoteModels.length > 0 && (
+          <div className="row">
+            <input className="input" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="搜索模型..." />
+            <select className="input" value={pickedModel} onChange={(event) => setPickedModel(event.target.value)}>
+              <option value="">选择模型</option>
+              {filteredRemoteModels.map((model) => (
+                <option key={model.id} value={model.id}>{model.id}</option>
+              ))}
+            </select>
+            <button type="button" className="btn primary" disabled={!pickedModel} onClick={() => void addModel(pickedModel)}>添加模型</button>
+          </div>
+        )}
+        {modelProviderId && !remoteLoading && remoteModels.length === 0 && (
+          <div className="row">
+            <input className="input" value={manualModel} onChange={(event) => setManualModel(event.target.value)} placeholder="手动输入模型名称（如 gpt-4o-mini）" />
+            <button type="button" className="btn primary" disabled={!manualModel.trim()} onClick={() => void addModel(manualModel)}>添加模型</button>
+          </div>
+        )}
         {models.length > 0 && (
           <table className="table">
             <thead><tr><th>模型名称</th><th>供应商</th><th className="right">操作</th></tr></thead>
             <tbody>
               {models.map((model) => (
-                <tr key={model.id}>
+                <tr key={String(model.id)}>
                   <td>{model.model_name}</td>
-                  <td className="dim">{providers.find((provider) => String(provider.id) === String(model.provider_id))?.name || model.provider_id}</td>
+                  <td className="dim">{providers.find((provider) => sameId(provider.id, model.provider_id))?.name || model.provider_id}</td>
                   <td className="right actions"><button type="button" className="btn text bad" onClick={() => void removeModel(model)}>删除</button></td>
                 </tr>
               ))}

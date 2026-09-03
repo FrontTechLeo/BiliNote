@@ -117,6 +117,13 @@ fn resolve_data_root(settings: &DesktopSettings) -> PathBuf {
 // ---------- 端口分配与探测 ----------
 
 fn port_in_use(port: u16) -> bool {
+    // 通配与回环都要探测：占用方可能监听 0.0.0.0（uvicorn 默认），也可能只绑
+    // 127.0.0.1。Windows 下「绑定特定地址」与「他进程已有的通配绑定」能同时成功，
+    // 只探测 127.0.0.1 会漏判，sidecar 要到 uvicorn bind 时才报 10048 退出。
+    let wildcard_taken = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).is_err();
+    if wildcard_taken {
+        return true;
+    }
     TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).is_err()
 }
 
@@ -161,7 +168,9 @@ fn backend_ready(port: u16) -> bool {
         response.extend_from_slice(&buffer);
     }
     let text = String::from_utf8_lossy(&response);
-    text.starts_with("HTTP/") && (text.contains(" 200") || text.contains(" 404"))
+    // 只认 200：宽容 404 会把「恰好占着端口的其他 HTTP 服务」误判成后端就绪，
+    // 前端随后所有 API 都会打到错误进程上
+    text.starts_with("HTTP/") && text.contains(" 200")
 }
 
 fn wait_for_backend(port: u16, app_handle: tauri::AppHandle) {
