@@ -764,6 +764,97 @@ class BatchTaskService:
         self._request_cancel_event(task_id)
         return result
 
+    def retry_items(self, batch_id: str, item_ids: list[str]) -> dict[str, Any]:
+        """批量启动（重试）失败/已取消的子任务；其它状态的自动跳过。"""
+        unique_ids = list(dict.fromkeys(item_ids))
+        if not unique_ids:
+            raise ValueError("请选择要启动的子任务")
+        db = SessionLocal()
+        retried = 0
+        try:
+            task = db.get(BatchTask, batch_id)
+            if not task:
+                raise KeyError("批量任务不存在")
+            items = db.query(BatchTaskItem).filter(
+                BatchTaskItem.batch_id == batch_id,
+                BatchTaskItem.id.in_(unique_ids),
+            ).all()
+            if len(items) != len(unique_ids):
+                raise KeyError("部分子任务不存在，请刷新后重试")
+            for item in items:
+                if item.status not in {TaskStatus.FAILED.value, TaskStatus.CANCELED.value}:
+                    continue
+                item.task_id = None
+                item.status = TaskStatus.PENDING.value
+                item.stage = TaskStatus.PENDING.value
+                item.message = "等待重试"
+                db.add(BatchTaskEvent(
+                    batch_item_id=item.id,
+                    status=TaskStatus.PENDING.value,
+                    message="用户批量启动重试",
+                ))
+                retried += 1
+            if not retried:
+                raise ValueError("选中的子任务中没有失败或已取消的任务，无需启动")
+            task.finished_at = None
+            self._refresh_counts(db, batch_id)
+            db.commit()
+            updated_task = self._serialize_task(task)
+        finally:
+            db.close()
+        self.start(batch_id)
+        return {
+            "task": updated_task,
+            "retried_count": retried,
+            "skipped_count": len(unique_ids) - retried,
+        }
+
+    def cancel_items(self, batch_id: str, item_ids: list[str]) -> dict[str, Any]:
+        """批量停止排队中/运行中的子任务；已结束的自动跳过。"""
+        unique_ids = list(dict.fromkeys(item_ids))
+        if not unique_ids:
+            raise ValueError("请选择要停止的子任务")
+        db = SessionLocal()
+        canceled = 0
+        cancel_task_ids: list[str | None] = []
+        try:
+            task = db.get(BatchTask, batch_id)
+            if not task:
+                raise KeyError("批量任务不存在")
+            items = db.query(BatchTaskItem).filter(
+                BatchTaskItem.batch_id == batch_id,
+                BatchTaskItem.id.in_(unique_ids),
+            ).all()
+            if len(items) != len(unique_ids):
+                raise KeyError("部分子任务不存在，请刷新后重试")
+            for item in items:
+                if item.status in _TERMINAL:
+                    continue
+                cancel_task_ids.append(item.task_id)
+                item.status = TaskStatus.CANCELED.value
+                item.stage = TaskStatus.CANCELED.value
+                item.message = "用户请求取消，当前请求结束后停止"
+                db.add(BatchTaskEvent(
+                    batch_item_id=item.id,
+                    status=TaskStatus.CANCELED.value,
+                    message=item.message,
+                ))
+                canceled += 1
+            if not canceled:
+                raise ValueError("选中的子任务都已结束，无需停止")
+            self._refresh_counts(db, batch_id)
+            db.commit()
+            updated_task = self._serialize_task(task)
+        finally:
+            db.close()
+        for task_id in cancel_task_ids:
+            self._request_cancel_event(task_id)
+        return {
+            "task": updated_task,
+            "canceled_count": canceled,
+            "skipped_count": len(unique_ids) - canceled,
+        }
+
     def _submit_item(self, item_id: str) -> Any:
         task_id = str(uuid.uuid4())
         db = SessionLocal()
@@ -1108,6 +1199,9 @@ class BatchTaskService:
             raise ValueError("没有可导出的完成笔记")
         buffer = io.BytesIO()
         index = [f"# {task_title}", "", "## 课程目录", ""]
+        # 截图目录必须走 runtime_paths 解析（数据根/OUT_DIR）：
+        # 相对 cwd 的 Path("static/screenshots") 在打包环境找错位置，导出会静默丢掉全部图片
+        screenshots_dir = Path(get_screenshots_dir())
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for item in items:
                 markdown = self._load_markdown(item.task_id or "")
@@ -1126,7 +1220,7 @@ class BatchTaskService:
                 markdown_name = f"{prefix}.md"
                 archive.writestr(markdown_name, markdown.encode("utf-8"))
                 for filename in set(images):
-                    source = Path("static") / "screenshots" / filename
+                    source = screenshots_dir / filename
                     if source.exists():
                         archive.write(source, f"{image_dir}/{filename}")
                 index.append(f"{item.position}. [{item.title}]({quote(markdown_name)})")

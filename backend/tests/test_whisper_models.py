@@ -29,6 +29,14 @@ def _load_module():
         logger_mod = types.ModuleType("app.utils.logger")
         logger_mod.get_logger = lambda name=None: logging.getLogger(name or "test")
         sys.modules["app.utils.logger"] = logger_mod
+    if "app.utils.runtime_paths" not in sys.modules:
+        # WhisperModelRegistry 默认落 get_config_dir()（分支新增）；
+        # stub 到临时目录，避免模块级单例创建真实 config 目录
+        runtime_paths_mod = types.ModuleType("app.utils.runtime_paths")
+        runtime_paths_mod.get_config_dir = (
+            lambda: os.path.join(tempfile.gettempdir(), "bili_whisper_models_test_config")
+        )
+        sys.modules["app.utils.runtime_paths"] = runtime_paths_mod
     spec = importlib.util.spec_from_file_location("whisper_models_under_test", MODULE_PATH)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
@@ -126,6 +134,26 @@ class TestHelpers(unittest.TestCase):
         self.assertTrue(wm.is_local_target("~/home/model"))
         self.assertFalse(wm.is_local_target("Org/Name"))  # repo_id 不是本地路径
         self.assertFalse(wm.is_local_target(""))
+
+    def test_is_hf_cache_complete(self):
+        # 下载中断残留（只有 refs，甚至只有 ref 引用）不算已下载
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = "Systran/faster-whisper-medium"
+            base = os.path.join(tmp, wm.hf_cache_dirname(repo))
+            os.makedirs(os.path.join(base, "refs"))
+            with open(os.path.join(base, "refs", "main"), "w") as f:
+                f.write("08e178d")
+            self.assertFalse(wm.is_hf_cache_complete(tmp, repo))
+
+            # snapshot + model.bin 齐全才算完整
+            snap = os.path.join(base, "snapshots", "08e178d")
+            os.makedirs(snap)
+            with open(os.path.join(snap, "model.bin"), "wb") as f:
+                f.write(b"x")
+            self.assertTrue(wm.is_hf_cache_complete(tmp, repo))
+
+            # 目录整体不存在
+            self.assertFalse(wm.is_hf_cache_complete(tmp, "Other/never-downloaded"))
 
 
 if __name__ == "__main__":

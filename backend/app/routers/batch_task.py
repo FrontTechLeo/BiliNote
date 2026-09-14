@@ -65,6 +65,12 @@ class BatchDeleteItemsRequest(BaseModel):
     item_ids: list[str]
 
 
+class BatchItemsActionRequest(BaseModel):
+    """批量启动/停止子任务时的请求体。"""
+
+    item_ids: list[str]
+
+
 class LocalPathsPreviewRequest(BaseModel):
     paths: list[str]
 
@@ -196,10 +202,30 @@ def retry_batch_item(batch_id: str, item_id: str):
         return R.error(msg=str(exc), code=400)
 
 
+@router.post("/batch/tasks/{batch_id}/items/batch_retry")
+def retry_batch_items(batch_id: str, data: BatchItemsActionRequest):
+    try:
+        return R.success(batch_task_service.retry_items(batch_id, data.item_ids))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
 @router.post("/batch/tasks/{batch_id}/items/{item_id}/cancel")
 def cancel_batch_item(batch_id: str, item_id: str):
     try:
         return R.success(batch_task_service.cancel_item(batch_id, item_id))
+    except KeyError as exc:
+        return R.error(msg=str(exc), code=404)
+    except ValueError as exc:
+        return R.error(msg=str(exc), code=400)
+
+
+@router.post("/batch/tasks/{batch_id}/items/batch_cancel")
+def cancel_batch_items(batch_id: str, data: BatchItemsActionRequest):
+    try:
+        return R.success(batch_task_service.cancel_items(batch_id, data.item_ids))
     except KeyError as exc:
         return R.error(msg=str(exc), code=404)
     except ValueError as exc:

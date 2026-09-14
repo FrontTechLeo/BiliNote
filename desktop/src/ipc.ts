@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { open as dialogOpen } from '@tauri-apps/plugin-dialog'
+import { open as dialogOpen, save as dialogSave } from '@tauri-apps/plugin-dialog'
+
+export type DialogFilter = { name: string; extensions: string[] }
 
 export type BackendInfo = {
   port: number
@@ -89,4 +91,31 @@ export const desktop = {
 function normalizeSelection(selected: string | string[] | null): string[] | null {
   if (!selected) return null
   return Array.isArray(selected) ? selected : [selected]
+}
+
+// ---------- 导出落盘：WebView 的 <a download> 在 Tauri 里不可靠，统一走原生另存为 + Rust 写文件 ----------
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '')
+    reader.onerror = () => reject(new Error('读取导出数据失败'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+/**
+ * 弹出原生「另存为」对话框让用户选择导出目录与文件名，并把内容写入磁盘。
+ * 返回写入的完整路径；用户取消返回 null；纯浏览器开发模式返回 ''（由调用方回退到网页下载）。
+ */
+export async function saveBlobToDisk(filename: string, blob: Blob, filters?: DialogFilter[]): Promise<string | null> {
+  if (!isTauri) return ''
+  const path = await dialogSave({
+    title: '选择导出位置',
+    defaultPath: filename,
+    filters: filters || [{ name: '所有文件', extensions: ['*'] }],
+  })
+  if (!path) return null
+  await invoke('write_export_file', { path, dataBase64: await blobToBase64(blob) })
+  return path
 }

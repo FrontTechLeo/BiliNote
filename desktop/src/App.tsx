@@ -5,14 +5,16 @@ import SingleTaskPage from './pages/SingleTaskPage'
 import BatchTaskPage from './pages/BatchTaskPage'
 import SettingsPage from './pages/SettingsPage'
 import MonitorPage from './pages/MonitorPage'
+import LogsPage from './pages/LogsPage'
 
-type PageKey = 'single' | 'batch' | 'settings' | 'monitor'
+type PageKey = 'single' | 'batch' | 'settings' | 'monitor' | 'logs'
 
 const navItems: { key: PageKey; label: string; icon: string }[] = [
   { key: 'single', label: '单视频任务', icon: '🎬' },
   { key: 'batch', label: '批量合集任务', icon: '🗂' },
   { key: 'settings', label: '设置', icon: '⚙️' },
   { key: 'monitor', label: '部署监控', icon: '📡' },
+  { key: 'logs', label: '服务日志', icon: '📜' },
 ]
 
 export default function App() {
@@ -138,6 +140,7 @@ function Shell() {
         {page === 'batch' && <BatchTaskPage />}
         {page === 'settings' && <SettingsPage />}
         {page === 'monitor' && <MonitorPage />}
+        {page === 'logs' && <LogsPage />}
       </main>
     </div>
   )

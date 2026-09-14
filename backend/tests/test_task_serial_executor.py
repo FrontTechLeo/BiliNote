@@ -16,7 +16,8 @@ SerialTaskExecutor = task_serial_executor.SerialTaskExecutor
 
 
 class TestTaskSerialExecutor(unittest.TestCase):
-    def test_executor_runs_tasks_one_by_one(self):
+    def test_executor_bounds_concurrency(self):
+        # ConcurrentTaskExecutor 允许并发，但峰值不得超过 max_workers。
         executor = SerialTaskExecutor()
         state_lock = threading.Lock()
         state = {"active": 0, "peak_active": 0}
@@ -29,13 +30,14 @@ class TestTaskSerialExecutor(unittest.TestCase):
             with state_lock:
                 state["active"] -= 1
 
-        threads = [threading.Thread(target=lambda: executor.run(critical_work)) for _ in range(2)]
+        threads = [threading.Thread(target=lambda: executor.run(critical_work)) for _ in range(4)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        self.assertEqual(state["peak_active"], 1)
+        self.assertGreaterEqual(state["peak_active"], 2)
+        self.assertLessEqual(state["peak_active"], executor.max_workers)
 
 
 if __name__ == "__main__":

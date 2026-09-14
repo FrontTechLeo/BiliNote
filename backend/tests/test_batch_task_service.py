@@ -705,3 +705,99 @@ def test_late_status_cannot_resurrect_canceled_item(tmp_path, monkeypatch):
     assert item.status == TaskStatus.CANCELED.value
     assert db.query(BatchTaskEvent).filter_by(batch_item_id="late-item").count() == 0
     db.close()
+
+
+def test_retry_and_cancel_items_bulk_actions(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite:///{tmp_path / 'batch-bulk.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(batch_module, "SessionLocal", session_factory)
+
+    db = session_factory()
+    db.add(BatchTask(
+        id="bulk-batch", title="批量操作", source_type="local", config_json="{}",
+        status="PARTIAL_FAILED", total_count=4, completed_count=1, failed_count=1, canceled_count=1,
+    ))
+    db.add_all([
+        BatchTaskItem(
+            id="bulk-failed", batch_id="bulk-batch", task_id="bulk-task-1",
+            source_url="/uploads/batch_videos/a.mp4", platform="local", title="失败课程",
+            position=1, status=TaskStatus.FAILED.value,
+        ),
+        BatchTaskItem(
+            id="bulk-canceled", batch_id="bulk-batch", task_id="bulk-task-2",
+            source_url="/uploads/batch_videos/b.mp4", platform="local", title="取消课程",
+            position=2, status=TaskStatus.CANCELED.value,
+        ),
+        BatchTaskItem(
+            id="bulk-running", batch_id="bulk-batch", task_id="bulk-task-3",
+            source_url="/uploads/batch_videos/c.mp4", platform="local", title="运行课程",
+            position=3, status=TaskStatus.TRANSCRIBING.value,
+        ),
+        BatchTaskItem(
+            id="bulk-success", batch_id="bulk-batch", task_id="bulk-task-4",
+            source_url="/uploads/batch_videos/d.mp4", platform="local", title="成功课程",
+            position=4, status=TaskStatus.SUCCESS.value,
+        ),
+    ])
+    db.commit()
+    db.close()
+
+    service = BatchTaskService()
+
+    # 批量启动：失败/已取消重新入队，成功/运行中的自动跳过
+    with patch.object(service, "start") as start:
+        result = service.retry_items("bulk-batch", ["bulk-failed", "bulk-canceled", "bulk-success", "bulk-running"])
+
+    assert result["retried_count"] == 2
+    assert result["skipped_count"] == 2
+    start.assert_called_once_with("bulk-batch")
+
+    db = session_factory()
+    task = db.get(BatchTask, "bulk-batch")
+    rows = {row.id: row for row in db.query(BatchTaskItem).filter_by(batch_id="bulk-batch").all()}
+    assert rows["bulk-failed"].status == TaskStatus.PENDING.value
+    assert rows["bulk-failed"].task_id is None
+    assert rows["bulk-canceled"].status == TaskStatus.PENDING.value
+    assert rows["bulk-success"].status == TaskStatus.SUCCESS.value
+    assert rows["bulk-running"].status == TaskStatus.TRANSCRIBING.value
+    assert task.finished_at is None
+    assert db.query(BatchTaskEvent).filter_by(batch_item_id="bulk-failed").count() == 1
+    db.close()
+
+    # 没有失败/已取消的子任务时不允许启动
+    with pytest.raises(ValueError, match="无需启动"):
+        service.retry_items("bulk-batch", ["bulk-success"])
+
+    # 批量停止：排队中/运行中的置为 CANCELED，已结束的自动跳过
+    with patch.object(service, "_request_cancel_event") as request_cancel:
+        stop_result = service.cancel_items(
+            "bulk-batch",
+            ["bulk-failed", "bulk-canceled", "bulk-running", "bulk-success"],
+        )
+
+    assert stop_result["canceled_count"] == 3
+    assert stop_result["skipped_count"] == 1
+    assert "bulk-task-3" in [call.args[0] for call in request_cancel.call_args_list]
+
+    db = session_factory()
+    task = db.get(BatchTask, "bulk-batch")
+    rows = {row.id: row for row in db.query(BatchTaskItem).filter_by(batch_id="bulk-batch").all()}
+    assert rows["bulk-failed"].status == TaskStatus.CANCELED.value
+    assert rows["bulk-canceled"].status == TaskStatus.CANCELED.value
+    assert rows["bulk-running"].status == TaskStatus.CANCELED.value
+    assert rows["bulk-running"].message == "用户请求取消，当前请求结束后停止"
+    assert rows["bulk-success"].status == TaskStatus.SUCCESS.value
+    assert task.completed_count == 1
+    assert task.canceled_count == 3
+    assert task.status == "PARTIAL_FAILED"
+    assert db.query(BatchTaskEvent).filter_by(batch_item_id="bulk-running").count() == 1
+    db.close()
+
+    # 没有可停止的子任务时报错
+    with pytest.raises(ValueError, match="无需停止"):
+        service.cancel_items("bulk-batch", ["bulk-success"])
+
+    # 不存在的子任务
+    with pytest.raises(KeyError, match="部分子任务不存在"):
+        service.cancel_items("bulk-batch", ["bulk-missing"])

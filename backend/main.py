@@ -39,7 +39,7 @@ from app.db.provider_dao import seed_default_providers
 from app.exceptions.exception_handlers import register_exception_handlers
 # from app.db.model_dao import init_model_table
 # from app.db.provider_dao import init_provider_table
-from app.utils.logger import get_logger
+from app.utils.logger import get_logger, setup_full_logging
 from app.utils.runtime_paths import (
     get_screenshots_dir,
     get_static_root,
@@ -141,4 +141,8 @@ if __name__ == "__main__":
     port = int(os.getenv("BACKEND_PORT", 8483))
     host = os.getenv("BACKEND_HOST", "0.0.0.0")
     logger.info(f"Starting server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port, reload=False)
+    # log_config=None：不让 uvicorn 重建自己的 logging 配置，
+    # 由 setup_full_logging 把全部日志（含 uvicorn 访问日志）统一写入 app.log，
+    # 桌面端「服务日志」页依赖这一点才能看到完整服务日志。
+    setup_full_logging()
+    uvicorn.run(app, host=host, port=port, reload=False, log_config=None)

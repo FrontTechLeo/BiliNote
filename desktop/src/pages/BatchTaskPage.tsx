@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, saveBlob, terminalStatuses } from '../api'
+import { api, saveExport, terminalStatuses } from '../api'
 import type { BatchItem, BatchTask, PreviewItem } from '../api'
 import { desktop } from '../ipc'
 import { Checkbox, Drawer, EmptyState, Field, Modal, ProgressBar, StatusTag, useConfirm, useReader, useToast } from '../ui'
@@ -471,6 +471,7 @@ function BatchDetail({ task, onClose, onAppend, onEdit, onTaskChange }: {
   const [tab, setTab] = useState<'items' | 'logs'>('items')
   const [events, setEvents] = useState<{ created_at?: string; status: string; message?: string }[]>([])
   const [busyId, setBusyId] = useState<string>()
+  const [exporting, setExporting] = useState(false)
   const loadRequestRef = useRef(0)
   const taskId = task?.id
 
@@ -491,6 +492,12 @@ function BatchDetail({ task, onClose, onAppend, onEdit, onTaskChange }: {
     ])
     if (requestId !== loadRequestRef.current) return
     setItems(updatedItems || [])
+    // 清掉已不存在的子任务 id，避免勾选状态在列表刷新后指向幽灵行
+    const ids = new Set((updatedItems || []).map((item) => item.id))
+    setSelected((current) => {
+      const next = current.filter((id) => ids.has(id))
+      return next.length === current.length ? current : next
+    })
     onTaskChange(updatedTask)
   }, [onTaskChange, taskId])
 
@@ -504,8 +511,14 @@ function BatchDetail({ task, onClose, onAppend, onEdit, onTaskChange }: {
     return () => window.clearInterval(timer)
   }, [batchIsActive, hasActiveItems, load, taskId])
 
-  const selectableItems = items.filter((item) => terminalStatuses.includes(item.status))
-  const allSelected = selectableItems.length > 0 && selectableItems.every((item) => selected.includes(item.id))
+  const itemById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items])
+  const selectedItems = selected.map((id) => itemById.get(id)).filter((item): item is BatchItem => Boolean(item))
+  // 启动只对失败/已取消的子任务有意义；停止只针对排队中/运行中的子任务
+  const retryableSelected = selectedItems.filter((item) => ['FAILED', 'CANCELED'].includes(item.status))
+  const stoppableSelected = selectedItems.filter((item) => !terminalStatuses.includes(item.status))
+  const deletableSelected = selectedItems.filter((item) => terminalStatuses.includes(item.status))
+  const exportableSelected = selectedItems.filter((item) => item.status === 'SUCCESS')
+  const allSelected = items.length > 0 && items.every((item) => selected.includes(item.id))
 
   const toggleSelect = (item: BatchItem, next: boolean) => {
     setSelected((current) => next ? [...current, item.id] : current.filter((id) => id !== item.id))
@@ -535,12 +548,17 @@ function BatchDetail({ task, onClose, onAppend, onEdit, onTaskChange }: {
   }
 
   const exportItems = async (ids?: string[]) => {
+    if (exporting) return
+    setExporting(true)
     try {
       const blob = await api.download(`/batch/tasks/${taskId}/export`, ids ? { item_ids: ids } : undefined)
-      saveBlob(blob, `${task?.title || 'notes'}.zip`)
-      toast('ok', '导出成功')
+      const savedPath = await saveExport(blob, task?.title || 'notes', 'zip')
+      if (savedPath === null) toast('warn', '已取消导出')
+      else toast('ok', savedPath ? `已导出到：${savedPath}` : '导出成功')
     } catch (error) {
       toast('bad', error instanceof Error ? error.message : '导出失败')
+    } finally {
+      setExporting(false)
     }
   }
 
@@ -598,18 +616,61 @@ function BatchDetail({ task, onClose, onAppend, onEdit, onTaskChange }: {
   }
 
   const deleteSelected = async () => {
-    if (!taskId || !selected.length) return
+    if (!taskId || !deletableSelected.length) return
     const ok = await confirm({
-      title: `删除选中的 ${selected.length} 个子任务？`,
-      content: '对应笔记、缓存、截图和无引用的本地源文件将一并清理，此操作不可恢复。',
+      title: `删除选中的 ${deletableSelected.length} 个子任务？`,
+      content: '对应笔记、缓存、截图和无引用的本地源文件将一并清理，此操作不可恢复。运行中或排队中的子任务会自动跳过。',
       danger: true, okText: '确认删除',
     })
     if (!ok) return
+    const ids = deletableSelected.map((item) => item.id)
     try {
-      const result = await api.post<{ task: BatchTask; deleted_count: number }>(`/batch/tasks/${taskId}/items/delete`, { item_ids: [...selected] })
-      applyDeletion(result, [...selected])
+      const result = await api.post<{ task: BatchTask; deleted_count: number }>(`/batch/tasks/${taskId}/items/delete`, { item_ids: ids })
+      applyDeletion(result, ids)
     } catch (error) {
       toast('bad', error instanceof Error ? error.message : '批量删除失败')
+    }
+  }
+
+  const startSelected = async () => {
+    if (!taskId || !retryableSelected.length) return
+    const ok = await confirm({
+      title: `启动选中的 ${retryableSelected.length} 个子任务？`,
+      content: '失败或已取消的子任务将重新进入执行队列，模型与格式沿用本批次设置。',
+      okText: '启动',
+    })
+    if (!ok) return
+    try {
+      const result = await api.post<{ task: BatchTask; retried_count: number; skipped_count: number }>(
+        `/batch/tasks/${taskId}/items/batch_retry`,
+        { item_ids: retryableSelected.map((item) => item.id) },
+      )
+      onTaskChange(result.task)
+      await load()
+      toast('ok', `已启动 ${result.retried_count} 个子任务${result.skipped_count ? `，跳过 ${result.skipped_count} 个` : ''}`)
+    } catch (error) {
+      toast('bad', error instanceof Error ? error.message : '批量启动失败')
+    }
+  }
+
+  const stopSelected = async () => {
+    if (!taskId || !stoppableSelected.length) return
+    const ok = await confirm({
+      title: `停止选中的 ${stoppableSelected.length} 个子任务？`,
+      content: '正在执行的任务将在当前请求返回后停止，已有转写和检查点会保留，之后可以再次启动。',
+      danger: true, okText: '停止',
+    })
+    if (!ok) return
+    try {
+      const result = await api.post<{ task: BatchTask; canceled_count: number; skipped_count: number }>(
+        `/batch/tasks/${taskId}/items/batch_cancel`,
+        { item_ids: stoppableSelected.map((item) => item.id) },
+      )
+      onTaskChange(result.task)
+      await load()
+      toast('ok', `已请求停止 ${result.canceled_count} 个子任务${result.skipped_count ? `，跳过 ${result.skipped_count} 个` : ''}`)
+    } catch (error) {
+      toast('bad', error instanceof Error ? error.message : '批量停止失败')
     }
   }
 
@@ -652,17 +713,27 @@ function BatchDetail({ task, onClose, onAppend, onEdit, onTaskChange }: {
             {appendableStatuses.includes(task.status) && (
               <button type="button" className="btn primary" onClick={() => onAppend(task)}>追加视频</button>
             )}
-            <button type="button" className="btn" onClick={() => void exportItems()}>导出全部</button>
-            <button type="button" className="btn" disabled={!selected.length} onClick={() => void exportItems(selected)}>导出所选</button>
-            <button type="button" className="btn danger ghost" disabled={!selected.length} onClick={() => void deleteSelected()}>批量删除</button>
+            <button type="button" className="btn" disabled={!retryableSelected.length}
+              onClick={() => void startSelected()}>批量启动</button>
+            <button type="button" className="btn" disabled={!stoppableSelected.length}
+              onClick={() => void stopSelected()}>批量停止</button>
+            <button type="button" className="btn" disabled={exporting} onClick={() => void exportItems()}>
+              {exporting ? '导出中…' : '导出全部'}
+            </button>
+            <button type="button" className="btn" disabled={exporting || !exportableSelected.length}
+              onClick={() => void exportItems(exportableSelected.map((item) => item.id))}>
+              {exporting ? '导出中…' : '导出所选'}
+            </button>
+            <button type="button" className="btn danger ghost" disabled={!deletableSelected.length}
+              onClick={() => void deleteSelected()}>批量删除</button>
+            {selected.length > 0 && <span className="dim">已选 {selected.length} 个</span>}
           </div>
           {items.length === 0 ? <EmptyState title="暂无子任务" /> : (
             <table className="table compact">
               <thead>
                 <tr>
                   <th style={{ width: 36 }}>
-                    <Checkbox checked={allSelected}
-                      onChange={(next) => setSelected(next ? selectableItems.map((item) => item.id) : [])}>
+                    <Checkbox checked={allSelected} onChange={(next) => setSelected(next ? items.map((item) => item.id) : [])}>
                       {''}
                     </Checkbox>
                   </th>
@@ -680,7 +751,7 @@ function BatchDetail({ task, onClose, onAppend, onEdit, onTaskChange }: {
                   return (
                     <tr key={item.id}>
                       <td>
-                        <Checkbox checked={selected.includes(item.id)} disabled={!canDelete}
+                        <Checkbox checked={selected.includes(item.id)}
                           onChange={(next) => toggleSelect(item, next)}>
                           {''}
                         </Checkbox>
@@ -697,8 +768,8 @@ function BatchDetail({ task, onClose, onAppend, onEdit, onTaskChange }: {
                       <td className="right actions">
                         <button type="button" className="btn text" disabled={item.status !== 'SUCCESS' || busyId === item.id}
                           onClick={() => void showPreview(item)}>阅读</button>
-                        <button type="button" className="btn text" disabled={item.status !== 'SUCCESS'}
-                          onClick={() => void exportItems([item.id])}>导出</button>
+                        <button type="button" className="btn text" disabled={item.status !== 'SUCCESS' || exporting}
+                          onClick={() => void exportItems([item.id])}>{exporting ? '导出中…' : '导出'}</button>
                         {['FAILED', 'CANCELED'].includes(item.status) && (
                           <button type="button" className="btn text warn" disabled={busyId === item.id}
                             onClick={() => void retry(item)}>重试</button>

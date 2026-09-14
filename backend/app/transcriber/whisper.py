@@ -1,11 +1,20 @@
 from faster_whisper import WhisperModel
 
+# huggingface_hub 随 faster-whisper 安装；防御性导入，失败时按未知类型处理
+try:
+    from huggingface_hub import constants as _hf_constants
+    from huggingface_hub.errors import LocalEntryNotFoundError as _HFLocalEntryNotFoundError
+except ImportError:
+    _hf_constants = None
+    _HFLocalEntryNotFoundError = ()
+
 from app.decorators.timeit import timeit
 from app.models.transcriber_model import TranscriptSegment, TranscriptResult
 from app.transcriber.base import Transcriber
 from app.transcriber.whisper_models import (
     resolve_whisper_model,
     is_local_target,
+    is_hf_cache_complete,
     hf_cache_dirname,
 )
 from app.utils.env_checker import cuda_inference_ready, is_cuda_available
@@ -16,12 +25,20 @@ from events import transcription_finished
 from pathlib import Path
 import os
 import shutil
+import threading
 
 
 '''
  Size of the model to use (tiny, tiny.en, base, base.en, small, small.en, distil-small.en, medium, medium.en, distil-medium.en, large-v1, large-v2, large-v3, large, distil-large-v2, distil-large-v3, large-v3-turbo, or turbo
 '''
 logger=get_logger(__name__)
+
+# 本机 Whisper 转写的路数闸门（进程级，CPU/GPU 一律生效）。转写是全局最重的环节：
+# 多路并发各自展开惰性解码循环时显存/算力成倍叠加，小显存卡（如 6GB）上 3 路 medium
+# 直接把显存顶满，表现为转写长时间零输出、任务卡在 TRANSCRIBING。按需求固定串行：
+# 同一批次内、以及不同批量任务（合集）之间都排队逐个转写。可用环境变量 WHISPER_GPU_CONCURRENCY 放大。
+_TRANSCRIBE_CONCURRENCY = max(1, int(os.getenv("WHISPER_GPU_CONCURRENCY", "1")))
+_transcribe_slots = threading.BoundedSemaphore(_TRANSCRIBE_CONCURRENCY)
 
 # 历史遗留：之前用 modelscope 下载到自定义目录然后把路径传给 WhisperModel。
 # 但 faster-whisper 1.1.1 的 download_model（utils.py:76）逻辑是：
@@ -54,10 +71,54 @@ class WhisperTranscriber(Transcriber):
         try:
             self.model = self._build_model(model_size, model_dir)
         except Exception as e:
-            # 自愈：损坏 / 截断 / 半成品 cache → 删掉对应 HF cache 重下一次
-            logger.warning(f"加载 whisper-{model_size} 失败：{e}；清理 cache 后重新下载")
+            if self._cache_complete(model_dir, model_size):
+                # 本地模型完整却加载失败：多半是运行期错误（并发 bug / CUDA / 显存），
+                # 与 cache 内容无关。绝不能删——完整 cache 可能是用户手动拷贝的模型，
+                # 曾经在并发竞争抛出 disabled_tqdm 异常时把用户的完整 medium 模型整目录删掉。
+                logger.warning(f"加载 whisper-{model_size} 失败，但本地模型完整，保留 cache 不清理：{e}")
+                raise self._load_failure(e, model_size, model_dir) from e
+            # cache 不完整/不存在：清掉半成品后重试一次下载（自愈仅限这种情况）
+            logger.warning(f"加载 whisper-{model_size} 失败且本地 cache 不完整：{e}；清理半成品后重新下载")
             self._purge_cache(model_dir, model_size)
-            self.model = self._build_model(model_size, model_dir)
+            try:
+                self.model = self._build_model(model_size, model_dir)
+            except Exception as retry_exc:
+                raise self._load_failure(retry_exc, model_size, model_dir) from retry_exc
+
+    @staticmethod
+    def _cache_complete(model_dir: str, model_size: str) -> bool:
+        """本地是否有完整可用的模型（HF cache snapshot 含 model.bin，或本地路径模型可用）。"""
+        try:
+            target = resolve_whisper_model(model_size)
+        except Exception:
+            return False
+        if is_local_target(target):
+            return (Path(target) / "model.bin").is_file()
+        return is_hf_cache_complete(model_dir, target)
+
+    @staticmethod
+    def _load_failure(exc: Exception, model_size: str, model_dir: str) -> RuntimeError:
+        """把底层加载错误翻译成带行动指引的错误（保留原始异常链）。
+
+        faster-whisper 在线下载失败时会吞掉真实网络错误、回退 local_files_only=True，
+        最终抛出的 LocalEntryNotFoundError 文案（"Cannot find an appropriate cached
+        snapshot folder ... outgoing traffic has been disabled"）极具误导性。
+        """
+        if isinstance(exc, _HFLocalEntryNotFoundError):
+            endpoint = getattr(_hf_constants, "ENDPOINT", None) if _hf_constants else None
+            endpoint_text = f"（下载端点: {endpoint}）" if endpoint else ""
+            msg = (
+                f'whisper 模型 "{model_size}" 未下载且联网下载失败。'
+                f"请检查网络或代理设置后重试；或在「音频转写配置」页先下载该模型；"
+                f"也可将完整模型目录（含 snapshots/blobs/refs）拷贝到 {model_dir}。{endpoint_text}"
+            )
+        else:
+            msg = (
+                f'whisper 模型 "{model_size}" 加载失败：{exc}。'
+                f"若反复出现，请检查模型文件是否完整（{model_dir}），"
+                f"或在「音频转写配置」页重新下载该模型。"
+            )
+        return RuntimeError(msg)
 
     def _build_model(self, model_size: str, model_dir: str) -> WhisperModel:
         # resolve 把模型名映射成可加载标识：内置 size→Systran repo_id、自定义映射、
@@ -73,9 +134,10 @@ class WhisperTranscriber(Transcriber):
 
     @staticmethod
     def _purge_cache(model_dir: str, model_size: str) -> None:
-        """加载失败时清掉对应 HF cache 的 snapshot 目录，强制下次重下。
+        """加载失败且本地 cache 确认不完整时，清掉对应 HF cache 的半成品目录，强制下次重下。
 
-        关键：本地路径模型**绝不删**——那是用户自己的文件，删了就是数据丢失；
+        只允许在 `_cache_complete` 判定为不完整后调用——完整的模型目录（尤其是用户
+        手动拷贝的）绝不删除。关键：本地路径模型**绝不删**——那是用户自己的文件；
         只清 HF cache 布局 <model_dir>/models--{org}--{name}/（含历史 modelscope 目录）。
         """
         try:
@@ -133,19 +195,31 @@ class WhisperTranscriber(Transcriber):
             return self._transcribe(file_path)
 
     def _transcribe(self, file_path: str) -> TranscriptResult:
-        segments_raw, info = self.model.transcribe(file_path)
+        acquired = _transcribe_slots.acquire(blocking=False)
+        if not acquired:
+            logger.info(
+                "转写并发已满（%s 路），排队等待空闲转写槽位", _TRANSCRIBE_CONCURRENCY
+            )
+            _transcribe_slots.acquire()
+        logger.info("获得转写槽位，开始推理")
+        try:
+            segments_raw, info = self.model.transcribe(file_path)
 
-        segments = []
-        full_text = ""
+            segments = []
+            full_text = ""
 
-        for seg in segments_raw:
-            text = seg.text.strip()
-            full_text += text + " "
-            segments.append(TranscriptSegment(
-                start=seg.start,
-                end=seg.end,
-                text=text
-            ))
+            # transcribe() 返回的是惰性生成器，真正推理发生在下面的迭代中；
+            # 槽位必须罩住整个迭代，否则限流形同虚设。
+            for seg in segments_raw:
+                text = seg.text.strip()
+                full_text += text + " "
+                segments.append(TranscriptSegment(
+                    start=seg.start,
+                    end=seg.end,
+                    text=text
+                ))
+        finally:
+            _transcribe_slots.release()
 
         return TranscriptResult(
             language=info.language,

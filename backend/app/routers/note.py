@@ -24,7 +24,7 @@ from app.services.task_serial_executor import task_serial_executor
 from app.services.single_task_history_service import single_task_history_service
 from app.services.task_cancellation import task_cancellation_registry
 from app.utils.response import ResponseWrapper as R
-from app.utils.runtime_paths import get_note_output_dir, get_uploads_dir, is_filesystem_absolute
+from app.utils.runtime_paths import get_media_data_dir, get_note_output_dir, get_screenshots_dir, get_uploads_dir, is_filesystem_absolute
 from app.utils.url_parser import extract_video_id
 from app.utils.video_reader import DEFAULT_IMAGE_COMPRESSION, normalize_image_compression
 from app.validators.video_url_validator import is_supported_video_url
@@ -489,8 +489,12 @@ _RAW_MARKER_RE = re.compile(r'\*?Screenshot-(?:\[(\d{2}):(\d{2})\]|(\d{2}):(\d{2
 
 
 def _find_video_file(video_id: str) -> Optional[Path]:
-    """根据 video_id 在 data/data/ 目录下查找已下载的视频文件。"""
-    data_dir = Path("data/data")
+    """根据 video_id 在数据目录下查找已下载的视频文件。
+
+    必须用 runtime_paths 解析：打包版桌面端进程 cwd 不确定，
+    写相对路径会在错误的目录里找视频，导致导出时无法现场生成截图。
+    """
+    data_dir = Path(get_media_data_dir()) / "data"
     for ext in (".mp4", ".mkv", ".flv", ".webm"):
         candidate = data_dir / f"{video_id}{ext}"
         if candidate.exists():
@@ -544,7 +548,9 @@ def export_note(task_id: str):
 
     safe_title = re.sub(r'[\\/:*?"<>|]', '_', title).strip() or "note"
 
-    screenshots_dir = Path("static/screenshots")
+    # 截图目录必须走 runtime_paths 解析（数据根/OUT_DIR），相对 cwd 在打包环境会找错位置，
+    # 找不到截图文件时导出会静默退化成不含图片的 md
+    screenshots_dir = Path(get_screenshots_dir())
     temporary_screenshot_dir: Optional[Path] = None
     image_filenames = []  # 要打包的截图文件名列表
     rewritten_md = markdown_text

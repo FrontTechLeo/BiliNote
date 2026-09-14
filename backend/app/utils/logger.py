@@ -40,3 +40,22 @@ def get_logger(name: str) -> logging.Logger:
         logger.addHandler(file_handler)
         logger.propagate = False
     return logger
+
+
+def log_file_path() -> Path:
+    return LOG_DIR / "app.log"
+
+
+def setup_full_logging() -> None:
+    """让 root logger 接管全部日志（含 uvicorn 访问日志与第三方库告警）。
+
+    必须在 uvicorn.run(log_config=None) 之前调用：uvicorn 默认的 dictConfig 会把
+    uvicorn.* 的 handler 重置为独立的 stdout/stderr；这里通过禁用该配置，让
+    uvicorn.* 的记录自然 propagate 到挂好 console+file handler 的 root logger，
+    从而 app.log 里能看到完整服务日志，供桌面端「服务日志」页实时查看。
+    """
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    for handler in (console_handler, file_handler):
+        if handler not in root.handlers:
+            root.addHandler(handler)

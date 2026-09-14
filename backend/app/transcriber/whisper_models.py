@@ -56,6 +56,23 @@ def hf_cache_dirname(repo_id: str) -> str:
     return "models--" + repo_id.replace("/", "--")
 
 
+def is_hf_cache_complete(model_dir: str, repo_id: str) -> bool:
+    """判断 HF cache 布局下该 repo 是否已有完整可加载的 snapshot（含 model.bin）。
+
+    下载中断的残留目录里往往只剩 refs/（甚至只是一个 ref 引用，连 blobs 都没有），
+    不能算已下载；blobs 缺失导致的悬空 symlink 也会被 is_file() 判为不完整。
+    「是否完整」是清理 cache 前的安全闸门：完整则绝不允许删除——那可能是用户
+    手动拷贝进来的模型，删了就是数据丢失。
+    """
+    snapshots = Path(model_dir) / hf_cache_dirname(repo_id) / "snapshots"
+    if not snapshots.is_dir():
+        return False
+    for snapshot in snapshots.iterdir():
+        if (snapshot / "model.bin").is_file():
+            return True
+    return False
+
+
 class WhisperModelRegistry:
     """内置 + 用户自定义的 whisper 模型映射，自定义部分持久化到 JSON。"""
 

@@ -406,6 +406,22 @@ fn get_install_path_diagnostics() -> PathDiagnostics {
     analyze_install_path(&exe_path)
 }
 
+/// 把导出的笔记文件（md / 含截图的 zip）写入用户在原生另存为对话框里选择的路径。
+/// WebView 的 <a download> 下载在 Tauri 里不可靠，统一走这条通道落盘。
+#[tauri::command]
+fn write_export_file(path: String, data_base64: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| format!("导出数据解码失败: {}", e))?;
+    let target = Path::new(&path);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建导出目录失败: {}", e))?;
+    }
+    fs::write(target, bytes).map_err(|e| format!("写入文件失败: {}", e))?;
+    Ok(path)
+}
+
 #[tauri::command]
 fn restart_backend_sidecar(app_handle: tauri::AppHandle) -> Result<(), String> {
     {
@@ -473,7 +489,8 @@ pub fn run() {
             open_data_dir,
             open_path,
             get_install_path_diagnostics,
-            restart_backend_sidecar
+            restart_backend_sidecar,
+            write_export_file
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

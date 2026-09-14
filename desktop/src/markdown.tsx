@@ -262,12 +262,14 @@ export default function MarkdownReader({
   content,
   title = 'AI 视频笔记',
   sourceUrl,
+  exporting = false,
   onDownload,
   onCopy,
 }: {
   content: string
   title?: string
   sourceUrl?: string
+  exporting?: boolean
   onDownload?: () => void
   onCopy?: () => void
 }) {
@@ -344,7 +346,11 @@ export default function MarkdownReader({
             </button>
           )}
           {onCopy && <button type="button" className="btn ghost small" onClick={onCopy}>复制 Markdown</button>}
-          {onDownload && <button type="button" className="btn primary small" onClick={onDownload}>导出</button>}
+          {onDownload && (
+            <button type="button" className="btn primary small" disabled={exporting} onClick={onDownload}>
+              {exporting ? '导出中…' : '导出'}
+            </button>
+          )}
         </div>
       </header>
 

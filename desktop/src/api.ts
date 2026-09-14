@@ -23,7 +23,16 @@ export const api = {
     const response = await fetch(`${apiBase || '/api'}${path}`, data === undefined ? undefined : {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
     })
-    if (!response.ok) throw new Error('导出失败')
+    if (!response.ok) {
+      // 导出失败时后端返回 FastAPI 的 {detail: ...}，尽量把原因带给用户
+      let detail = `导出失败（HTTP ${response.status}）`
+      try {
+        const body = await response.json()
+        if (typeof body?.detail === 'string') detail = body.detail
+        else if (typeof body?.msg === 'string') detail = body.msg
+      } catch { /* 非 JSON 响应保留默认提示 */ }
+      throw new Error(detail)
+    }
     return response.blob()
   },
 }
@@ -35,6 +44,26 @@ export function saveBlob(blob: Blob, filename: string) {
   link.download = filename
   link.click()
   URL.revokeObjectURL(url)
+}
+
+export function sanitizeFilename(title: string, fallback = 'note') {
+  return title.replace(/[\\/:*?"<>|]/g, '-').trim() || fallback
+}
+
+/**
+ * 导出下载内容到磁盘：Tauri 里弹原生「另存为」选目录后写入；
+ * 返回落盘完整路径；用户取消返回 null；纯浏览器开发模式走网页下载，返回 ''。
+ */
+export async function saveExport(blob: Blob, baseTitle: string, forcedExtension?: 'zip'): Promise<string | null> {
+  const { saveBlobToDisk } = await import('./ipc')
+  const extension = forcedExtension ?? (blob.type.includes('zip') ? 'zip' : 'md')
+  const filename = `${sanitizeFilename(baseTitle)}.${extension}`
+  const filters = [extension === 'zip'
+    ? { name: 'ZIP 压缩包', extensions: ['zip'] }
+    : { name: 'Markdown 文档', extensions: ['md'] }]
+  const savedPath = await saveBlobToDisk(filename, blob, filters)
+  if (savedPath === '') saveBlob(blob, filename)
+  return savedPath
 }
 
 // ---------- 类型 ----------

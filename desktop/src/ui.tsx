@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { api, saveBlob, statusColor } from './api'
+import { api, saveExport, statusColor } from './api'
 import MarkdownReader from './markdown'
 
 // ---------- Toast ----------
@@ -219,17 +219,22 @@ export function useReader() {
 
 export function ReaderProvider({ children }: { children: ReactNode }) {
   const [payload, setPayload] = useState<ReaderPayload | null>(null)
+  const [exporting, setExporting] = useState(false)
   const open = useCallback<ReaderContextValue>((next) => setPayload(next), [])
   const toast = useToast()
 
   const download = async () => {
-    if (!payload?.taskId) return
+    if (!payload?.taskId || exporting) return
+    setExporting(true)
     try {
       const blob = await api.download(`/export_note/${payload.taskId}`)
-      const extension = blob.type.includes('zip') ? 'zip' : 'md'
-      saveBlob(blob, `${payload.title.replace(/[\\/:*?"<>|]/g, '-').trim() || 'note'}.${extension}`)
+      const savedPath = await saveExport(blob, payload.title)
+      if (savedPath === null) toast('warn', '已取消导出')
+      else toast('ok', savedPath ? `已导出到：${savedPath}` : '导出成功')
     } catch (error) {
       toast('bad', error instanceof Error ? error.message : '导出失败')
+    } finally {
+      setExporting(false)
     }
   }
 
@@ -247,6 +252,7 @@ export function ReaderProvider({ children }: { children: ReactNode }) {
               content={payload.markdown}
               title={payload.title}
               sourceUrl={payload.sourceUrl}
+              exporting={exporting}
               onDownload={payload.taskId ? () => void download() : undefined}
               onCopy={() => {
                 void navigator.clipboard.writeText(payload.markdown)

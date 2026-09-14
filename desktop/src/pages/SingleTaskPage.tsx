@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, saveBlob, terminalStatuses } from '../api'
+import { api, saveExport, terminalStatuses } from '../api'
 import type { SingleTaskHistory, SingleTaskStatus } from '../api'
 import { desktop } from '../ipc'
 import { EmptyState, Field, StatusTag, useConfirm, useReader, useToast } from '../ui'
@@ -30,6 +30,7 @@ export default function SingleTaskPage() {
   const [task, setTask] = useState<SingleTaskStatus>()
   const [history, setHistory] = useState<SingleTaskHistory[]>([])
   const [busyId, setBusyId] = useState<string>()
+  const [exportingId, setExportingId] = useState<string>()
   const autoOpenedRef = useRef<string | undefined>(undefined)
 
   const patchValues = (patch: Partial<NoteValues>) => setValues((current) => ({ ...current, ...patch }))
@@ -129,13 +130,17 @@ export default function SingleTaskPage() {
   }
 
   const exportTask = async (taskId: string, title: string) => {
+    if (exportingId) return
+    setExportingId(taskId)
     try {
       const blob = await api.download(`/export_note/${taskId}`)
-      const extension = blob.type.includes('zip') ? 'zip' : 'md'
-      saveBlob(blob, `${title.replace(/[\\/:*?"<>|]/g, '-').trim() || 'note'}.${extension}`)
-      toast('ok', '导出成功')
+      const savedPath = await saveExport(blob, title)
+      if (savedPath === null) toast('warn', '已取消导出')
+      else toast('ok', savedPath ? `已导出到：${savedPath}` : '导出成功')
     } catch (error) {
       toast('bad', error instanceof Error ? error.message : '导出失败')
+    } finally {
+      setExportingId(undefined)
     }
   }
 
@@ -271,9 +276,9 @@ export default function SingleTaskPage() {
                 <div className="toolbar">
                   <button type="button" className="btn" disabled={!task.result?.markdown}
                     onClick={() => openNote(task, currentTitle)}>阅读笔记</button>
-                  <button type="button" className="btn" disabled={!task.result?.markdown}
+                  <button type="button" className="btn" disabled={!task.result?.markdown || exportingId === task.task_id}
                     onClick={() => void exportTask(task.task_id, currentTitle)}>
-                    导出{task.result?.markdown?.includes('/static/screenshots/') ? ' ZIP' : ''}
+                    {exportingId === task.task_id ? '导出中…' : `导出${task.result?.markdown?.includes('/static/screenshots/') ? ' ZIP' : ''}`}
                   </button>
                 </div>
               </div>
@@ -304,8 +309,10 @@ export default function SingleTaskPage() {
                     <td className="right actions">
                       <button type="button" className="btn text" disabled={!record.has_result || busyId === record.task_id}
                         onClick={() => void readHistory(record)}>阅读</button>
-                      <button type="button" className="btn text" disabled={!record.has_result}
-                        onClick={() => void exportTask(record.task_id, record.title || 'note')}>导出</button>
+                      <button type="button" className="btn text" disabled={!record.has_result || exportingId === record.task_id}
+                        onClick={() => void exportTask(record.task_id, record.title || 'note')}>
+                        {exportingId === record.task_id ? '导出中…' : '导出'}
+                      </button>
                       {!terminalStatuses.includes(record.status) && (
                         <button type="button" className="btn text warn" disabled={busyId === record.task_id}
                           onClick={() => void cancelTask(record)}>停止</button>

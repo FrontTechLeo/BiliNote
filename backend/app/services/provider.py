@@ -1,5 +1,14 @@
 from fastapi.encoders import jsonable_encoder
-from kombu import uuid
+
+# kombu 仅用于生成任务 id（kombu.uuid ≡ str(uuid4())）；环境未装 celery/kombu 时回退标准库，
+# 不应让整个 provider 模块（被转写器导入链拉起）因这个可选依赖 import 失败。
+try:
+    from kombu import uuid
+except ImportError:
+    from uuid import uuid4 as _uuid4
+
+    def uuid() -> str:
+        return str(_uuid4())
 
 from app.db.models.providers import Provider
 from app.db.provider_dao import (

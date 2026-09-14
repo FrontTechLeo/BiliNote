@@ -118,10 +118,11 @@ def update_transcriber_config(data: TranscriberConfigRequest):
     )
     # 转写器是进程内单例：配置变更后必须失效，下一次任务才用新引擎/新模型重建，
     # 否则用户在设置页切换模型后仍会一直用旧模型（直到重启进程）。
+    # reset_transcriber 同时清掉创建失败负缓存，避免新配置被旧失败短路。
     try:
         from app.transcriber import transcriber_provider
-        transcriber_provider._transcribers[transcriber_provider.TranscriberType.FAST_WHISPER] = None
-        transcriber_provider._transcribers[transcriber_provider.TranscriberType.MLX_WHISPER] = None
+        transcriber_provider.reset_transcriber(transcriber_provider.TranscriberType.FAST_WHISPER)
+        transcriber_provider.reset_transcriber(transcriber_provider.TranscriberType.MLX_WHISPER)
     except Exception as e:
         logger.warning(f"重置转写器单例失败（不影响已保存配置）: {e}")
     return R.success(data=config)
@@ -175,7 +176,7 @@ def _check_whisper_model_exists(model_size: str, subdir: str = "whisper") -> boo
     from app.transcriber.whisper_models import (
         resolve_whisper_model,
         is_local_target,
-        hf_cache_dirname,
+        is_hf_cache_complete,
     )
     try:
         target = resolve_whisper_model(model_size)
@@ -185,12 +186,10 @@ def _check_whisper_model_exists(model_size: str, subdir: str = "whisper") -> boo
         return (Path(target) / "model.bin").exists()
 
     model_dir = Path(get_model_dir(subdir))
-    # HF cache 布局（适配任意 org/repo，不再写死 Systran）
-    hf_repo_dir = model_dir / hf_cache_dirname(target) / "snapshots"
-    if hf_repo_dir.exists():
-        for snapshot in hf_repo_dir.iterdir():
-            if (snapshot / "model.bin").exists():
-                return True
+    # HF cache 布局（适配任意 org/repo，不再写死 Systran）；
+    # 只有 refs/ 没有 snapshots/ 的下载残留不算已下载
+    if is_hf_cache_complete(model_dir, target):
+        return True
     # 历史 modelscope 布局（向后兼容老用户）
     legacy = model_dir / f"whisper-{model_size}" / "model.bin"
     return legacy.exists()

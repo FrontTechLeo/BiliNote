@@ -1,5 +1,7 @@
 import os
 import platform
+import threading
+import time
 from enum import Enum
 
 from app.transcriber.groq import GroqTranscriber
@@ -39,16 +41,43 @@ _transcribers = {
 }
 
 # 公共实例初始化函数
+# 批量任务多个 worker 并发首次取转写器时，check-then-set 若不加锁会各自 new 一份
+# Whisper 模型（显存成倍占用，小显存卡上直接把转写挤死），必须持锁完成整个检查+创建。
+_transcriber_init_lock = threading.Lock()
+
+# 创建失败负缓存：key -> (失败时间, 异常)。批量任务 N 个 worker 并发取转写器时，
+# 第一个创建失败（模型未下载、网络不通等）后，其余 worker 在窗口内直接复用同一
+# 错误快速失败，避免逐个 new + 重试循环放大（曾在 17 秒内连续十几轮尝试）。
+# 窗口过期后允许再次尝试——网络可能已恢复。
+_INIT_FAILURE_TTL_SECONDS = 30
+_init_failures: dict = {}
+
+
 def _init_transcriber(key: TranscriberType, cls, *args, **kwargs):
-    if _transcribers[key] is None:
-        logger.info(f'创建 {cls.__name__} 实例: {key}')
-        try:
-            _transcribers[key] = cls(*args, **kwargs)
-            logger.info(f'{cls.__name__} 创建成功')
-        except Exception as e:
-            logger.error(f"{cls.__name__} 创建失败: {e}")
-            raise
-    return _transcribers[key]
+    with _transcriber_init_lock:
+        if _transcribers[key] is None:
+            failure = _init_failures.get(key)
+            if failure is not None:
+                if time.monotonic() - failure[0] < _INIT_FAILURE_TTL_SECONDS:
+                    raise failure[1]
+                _init_failures.pop(key, None)
+            logger.info(f'创建 {cls.__name__} 实例: {key}')
+            try:
+                _transcribers[key] = cls(*args, **kwargs)
+                logger.info(f'{cls.__name__} 创建成功')
+                _init_failures.pop(key, None)
+            except Exception as e:
+                logger.error(f"{cls.__name__} 创建失败: {e}")
+                _init_failures[key] = (time.monotonic(), e)
+                raise
+        return _transcribers[key]
+
+
+def reset_transcriber(key: TranscriberType) -> None:
+    """配置变更后失效单例与失败标记，下一次任务按新配置重建。"""
+    with _transcriber_init_lock:
+        _transcribers[key] = None
+        _init_failures.pop(key, None)
 
 # 各类型获取方法
 def get_groq_transcriber():
