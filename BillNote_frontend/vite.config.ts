@@ -1,3 +1,4 @@
+import http from 'node:http'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import fs from 'fs'
@@ -27,6 +28,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, envDir)
 
   const apiBaseUrl = env.VITE_API_BASE_URL || 'http://127.0.0.1:8483'
+  const noKeepAliveAgent = new http.Agent({ keepAlive: false })
   const port = parseInt(env.VITE_FRONTEND_PORT || '3015', 10)
   const appVersion = env.VITE_APP_VERSION || process.env.VITE_APP_VERSION || readAppVersion()
 
@@ -57,14 +59,18 @@ export default defineConfig(({ mode }) => {
       port: port,
       allowedHosts: true, // 允许任意域名访问
       proxy: {
+        // 开发代理禁用 keep-alive：Node 19+ 默认 keepAlive=true，复用 uvicorn
+        // 5s 超时后关闭的死连接会导致请求静默挂起（前端偶发"无反应"）。
         '/api': {
           target: apiBaseUrl,
           changeOrigin: true,
+          agent: noKeepAliveAgent,
           rewrite: path => path.replace(/^\/api/, '/api'),
         },
         '/static': {
           target: apiBaseUrl,
           changeOrigin: true,
+          agent: noKeepAliveAgent,
           rewrite: path => path.replace(/^\/static/, '/static'),
         },
       },

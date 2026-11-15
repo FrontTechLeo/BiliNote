@@ -49,6 +49,44 @@ def seed_default_providers():
         db.close()
 
 
+def ensure_agent_cli_providers():
+    """幂等补种 agent CLI 型供应商（builtin_providers.json 中 type=agent_cli 的条目）。
+
+    seed_default_providers 仅在空表时执行，存量库升级后不会自动获得新增的
+    内置供应商，这里按 id 补种，已存在则跳过。
+    """
+    db = next(get_db())
+    try:
+        json_path = get_builtin_providers_path()
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                providers = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to read builtin_providers.json: {e}")
+            return
+
+        for p in providers:
+            if p.get('type') != 'agent_cli':
+                continue
+            if db.query(Provider).filter_by(id=p['id']).first() is not None:
+                continue
+            db.add(Provider(
+                id=p['id'],
+                name=p['name'],
+                api_key=p.get('api_key', ''),
+                base_url=p.get('base_url', ''),
+                logo=p.get('logo', 'custom'),
+                type=p['type'],
+                enabled=p.get('enabled', 1)
+            ))
+            logger.info(f"Agent CLI provider seeded: {p['id']}")
+        db.commit()
+    except Exception as e:
+        logger.error(f"Failed to ensure agent cli providers: {e}")
+    finally:
+        db.close()
+
+
 def insert_provider(id: str, name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1):
     db = next(get_db())
     try:

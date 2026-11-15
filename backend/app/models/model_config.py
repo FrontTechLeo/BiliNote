@@ -14,3 +14,4 @@ class ModelConfig:
     base_url: str               # 模型 API 接口地址（OpenAI SDK兼容）
     model_name: str             # 实际请求用的模型名称，如 "gpt-4-turbo"
     created_at: Optional[datetime] = None  # 可选：创建时间（从 SQLite 自动生成）
+    agent_kind: str = ""        # provider 为 agent_cli 时的具体 CLI 类型（zcode/codex/...）

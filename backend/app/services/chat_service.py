@@ -10,6 +10,18 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# agent CLI 型供应商不支持 OpenAI tool-calling 协议，问答走简化实现：
+# 检索上下文 + 对话历史拼入单一 prompt 交给本机 agent 回答。
+AGENT_CHAT_SYSTEM_PROMPT = """你是一个视频笔记问答助手。以下是自动检索到的与问题相关的视频内容（笔记与转录片段），请据此回答：
+
+--- 检索内容 ---
+{context}
+---
+
+回答要求：
+- 请用中文回答，保持简洁准确
+- 回答要基于上述检索内容；如果检索内容不足以回答，请如实说明"""
+
 SYSTEM_PROMPT = """你是一个视频笔记问答助手。你拥有以下能力：
 
 1. 系统已自动检索了一些相关内容作为初始参考（见下方）
@@ -66,6 +78,15 @@ def _build_sources(chunks: list[dict]) -> list[dict]:
     return sources
 
 
+def _flatten_chat_prompt(system_msg: str, history: list[dict], question: str) -> str:
+    """把 system + 历史 + 问题扁平化为单一 prompt（agent CLI 输入形态）。"""
+    lines = [system_msg, "", "--- 对话历史 ---"]
+    for msg in history[-20:]:
+        lines.append(f"[{msg['role']}]: {msg['content']}")
+    lines += ["", f"[user]: {question}", "", "请直接输出对本轮问题的最终回答。"]
+    return "\n".join(lines)
+
+
 def chat(
     task_id: str,
     question: str,
@@ -107,8 +128,17 @@ def chat(
         model_name=model_name,
         provider=provider["type"],
         name=provider["name"],
+        agent_kind=ProviderService.get_agent_kind(provider),
     )
     gpt = GPTFactory.from_config(config)
+
+    # agent CLI 型供应商：不支持 OpenAI tool-calling 协议，走简化问答
+    if provider.get("type") == "agent_cli":
+        logger.info(f"Chat (agent cli): task_id={task_id}, model={model_name}")
+        system_msg = AGENT_CHAT_SYSTEM_PROMPT.format(context=context)
+        prompt = _flatten_chat_prompt(system_msg, history, question)
+        answer = gpt.complete_text(prompt)
+        return {"answer": answer, "sources": sources}
 
     logger.info(f"Chat: task_id={task_id}, model={model_name}")
 

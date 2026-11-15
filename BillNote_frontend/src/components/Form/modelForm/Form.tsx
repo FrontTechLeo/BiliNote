@@ -30,13 +30,24 @@ import { Tags } from 'lucide-react'
 import { X } from 'lucide-react'
 import { useModelStore } from '@/store/modelStore'
 
-// ✅ Provider表单schema
-const ProviderSchema = z.object({
-  name: z.string().min(2, '名称不能少于 2 个字符'),
-  apiKey: z.string().optional(),
-  baseUrl: z.string().url('必须是合法 URL'),
-  type: z.string(),
-})
+// ✅ Provider表单schema（agent_cli 类型无 apiKey/baseUrl，按 type 条件校验）
+const ProviderSchema = z
+  .object({
+    name: z.string().min(2, '名称不能少于 2 个字符'),
+    apiKey: z.string().optional(),
+    baseUrl: z.string().optional(),
+    type: z.string(),
+  })
+  .superRefine((values, ctx) => {
+    if (values.type === 'agent_cli') return
+    if (!values.baseUrl || z.string().url().safeParse(values.baseUrl).success === false) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['baseUrl'],
+        message: '必须是合法 URL',
+      })
+    }
+  })
 
 type ProviderFormValues = z.infer<typeof ProviderSchema>
 
@@ -84,6 +95,8 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
       type: 'custom',
     },
   })
+  const watchType = providerForm.watch('type')
+  const isAgentCli = watchType === 'agent_cli'
   const filteredModelOptions = modelOptions.filter(model => {
     const keywords = search.trim().toLowerCase().split(/\s+/) // 支持多个关键词
     const target = model.id.toLowerCase()
@@ -140,7 +153,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
   // 测试连通性
   const handleTest = async () => {
     const values = providerForm.getValues()
-    if (!values.apiKey || !values.baseUrl) {
+    if (!isAgentCli && (!values.apiKey || !values.baseUrl)) {
       toast.error('请填写 API Key 和 Base URL')
       return
     }
@@ -168,7 +181,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
   // 加载模型列表
   const handleModelLoad = async () => {
     const values = providerForm.getValues()
-    if (!values.apiKey || !values.baseUrl) {
+    if (!isAgentCli && (!values.apiKey || !values.baseUrl)) {
       toast.error('请先填写 API Key 和 Base URL')
       return
     }
@@ -222,10 +235,20 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
           <div className="text-lg font-bold">
             {isEditMode ? '编辑模型供应商' : '新增模型供应商'}
           </div>
-          {!isBuiltIn && (
-            <div className="text-sm text-red-500 italic">
-              自定义模型供应商需要确保兼容 OpenAI SDK
-            </div>
+          {isAgentCli ? (
+            <Alert className="border-blue-200 bg-blue-50">
+              <AlertTitle>本地 Agent CLI 模式</AlertTitle>
+              <AlertDescription>
+                直接调用本机 zcode 命令行（ZCode CLI）完成 AI 总结与视频理解，无需配置 API
+                Key 和 API 地址。请确认本机已安装并登录 zcode。
+              </AlertDescription>
+            </Alert>
+          ) : (
+            !isBuiltIn && (
+              <div className="text-sm text-red-500 italic">
+                自定义模型供应商需要确保兼容 OpenAI SDK
+              </div>
+            )
           )}
           <FormField
             control={providerForm.control}
@@ -234,41 +257,52 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
               <FormItem className="flex items-center gap-4">
                 <FormLabel className="w-24 text-right">名称</FormLabel>
                 <FormControl>
-                  <Input {...field} disabled={isBuiltIn} className="flex-1" />
+                  <Input {...field} disabled={isBuiltIn || isAgentCli} className="flex-1" />
                 </FormControl>
                 <FormMessage />
               </FormItem>
             )}
           />
-          <FormField
-            control={providerForm.control}
-            name="apiKey"
-            render={({ field }) => (
-              <FormItem className="flex items-center gap-4">
-                <FormLabel className="w-24 text-right">API Key</FormLabel>
-                <FormControl>
-                  <Input {...field} className="flex-1" />
-                </FormControl>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          <FormField
-            control={providerForm.control}
-            name="baseUrl"
-            render={({ field }) => (
-              <FormItem className="flex items-center gap-4">
-                <FormLabel className="w-24 text-right">API地址</FormLabel>
-                <FormControl>
-                  <Input {...field} className="flex-1" />
-                </FormControl>
-                <Button type="button" onClick={handleTest} variant="ghost" disabled={testing}>
-                  {testing ? '测试中...' : '测试连通性'}
-                </Button>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+          {!isAgentCli && (
+            <FormField
+              control={providerForm.control}
+              name="apiKey"
+              render={({ field }) => (
+                <FormItem className="flex items-center gap-4">
+                  <FormLabel className="w-24 text-right">API Key</FormLabel>
+                  <FormControl>
+                    <Input {...field} className="flex-1" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          )}
+          {!isAgentCli ? (
+            <FormField
+              control={providerForm.control}
+              name="baseUrl"
+              render={({ field }) => (
+                <FormItem className="flex items-center gap-4">
+                  <FormLabel className="w-24 text-right">API地址</FormLabel>
+                  <FormControl>
+                    <Input {...field} className="flex-1" />
+                  </FormControl>
+                  <Button type="button" onClick={handleTest} variant="ghost" disabled={testing}>
+                    {testing ? '测试中...' : '测试连通性'}
+                  </Button>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          ) : (
+            <FormItem className="flex items-center gap-4">
+              <FormLabel className="w-24 text-right">CLI 检测</FormLabel>
+              <Button type="button" onClick={handleTest} variant="ghost" disabled={testing}>
+                {testing ? '检测中...' : '检测本机 CLI'}
+              </Button>
+            </FormItem>
+          )}
           <FormField
             control={providerForm.control}
             name="type"

@@ -29,6 +29,16 @@ class ModelService:
         if not provider:
             return []
 
+        # agent CLI 型供应商：无 OpenAI API，返回内置静态模型列表
+        if provider.get("type") == "agent_cli":
+            from app.gpt.agent_cli.registry import resolve
+
+            try:
+                return resolve(ProviderService.get_agent_kind(provider)).list_models()
+            except Exception as e:
+                print(f"[{provider['name']}] 获取模型失败: {e}")
+                return []
+
         try:
             config = ModelService._build_model_config(provider)
             gpt = GPTFactory().from_config(config)
@@ -86,6 +96,22 @@ class ModelService:
         try:
             provider = ProviderService.get_provider_by_id(provider_id)
 
+            # agent CLI 型供应商：无 OpenAI models API，返回内置静态列表
+            # （保持 OpenAI 响应形状 {models: {data: [{id: ...}]}}，前端选择器通用）
+            if provider.get("type") == "agent_cli":
+                from app.gpt.agent_cli.registry import resolve
+
+                names = resolve(ProviderService.get_agent_kind(provider)).list_models()
+                logger.info(f"[{provider['name']}] 获取模型成功（agent cli 静态列表）")
+                return {
+                    "models": {
+                        "data": [
+                            {"id": name, "object": "model", "owned_by": provider["id"]}
+                            for name in names
+                        ]
+                    }
+                }
+
             models = ModelService.get_model_list(provider["id"], verbose=verbose)
             print(type(models))
             serializable_models = [m.dict() for m in models.data]
@@ -114,6 +140,24 @@ class ModelService:
                 code=ProviderErrorEnum.NOT_FOUND.code,
                 message=ProviderErrorEnum.NOT_FOUND.message,
             )
+
+        # agent CLI 型供应商：无 api_key/base_url，改测本机 CLI 可用性
+        if provider.get("type") == "agent_cli":
+            from app.gpt.agent_cli.registry import resolve
+
+            impl = resolve(ProviderService.get_agent_kind(provider))
+            ok, detail = impl.check_available()
+            if ok:
+                return True
+            raise ProviderError(
+                code=ProviderErrorEnum.WRONG_PARAMETER.code,
+                message=(
+                    f"未检测到可用的 {impl.display_name}（{detail}）。"
+                    f"请确认已安装、已登录并加入 PATH，或通过环境变量 "
+                    f"{impl.cli_path_env} 指定可执行文件完整路径"
+                ),
+            )
+
         if not provider.get('api_key'):
             raise ProviderError(
                 code=ProviderErrorEnum.NOT_FOUND.code,

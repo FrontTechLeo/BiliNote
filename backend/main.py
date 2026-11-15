@@ -35,7 +35,7 @@ if _cuda_dll_dir:
         pass
 
 from app.db.init_db import init_db
-from app.db.provider_dao import seed_default_providers
+from app.db.provider_dao import ensure_agent_cli_providers, seed_default_providers
 from app.exceptions.exception_handlers import register_exception_handlers
 # from app.db.model_dao import init_model_table
 # from app.db.provider_dao import init_provider_table
@@ -89,6 +89,8 @@ async def lifespan(app: FastAPI):
 
         logger.info("[startup 4/5] seed_default_providers() — 初始化默认 LLM 供应商")
         seed_default_providers()
+        # 存量库补种 agent CLI 型供应商（如 ZCode CLI），幂等
+        ensure_agent_cli_providers()
 
         logger.info("[startup 5/5] 启动完成，等待请求")
         from app.services.batch_task_service import batch_task_service

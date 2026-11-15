@@ -54,5 +54,13 @@
     "logo": "Ollama",
     "api_key": "",
     "base_url": "http://127.0.0.1:11434/v1"
-  }
-]
+  },
+      {
+        "id": "zcode-cli",
+        "name": "ZCode CLI",
+        "type": "agent_cli",
+        "logo": "custom",
+        "api_key": "",
+        "base_url": ""
+      }
+    ]

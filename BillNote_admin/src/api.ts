@@ -3,9 +3,14 @@ export type UploadProgress = { loaded: number; total: number; percent: number }
 
 const baseUrl = import.meta.env.VITE_API_BASE_URL || '/api'
 
+// 开发代理与后端 keep-alive 存在偶发竞态（请求发出后响应悬挂），
+// 统一加超时兜底，避免调用方无限等待导致界面"无反应"。
+const REQUEST_TIMEOUT_MS = 20000
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
     cache: 'no-store',
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     ...init,
     headers: init?.body instanceof FormData ? init.headers : { 'Content-Type': 'application/json', ...init?.headers },
   })

@@ -319,6 +319,7 @@ class NoteGenerator:
             model_name=model_name,
             provider=provider["type"],
             name=provider["name"],
+            agent_kind=ProviderService.get_agent_kind(provider),
         )
         return GPTFactory().from_config(config)
 

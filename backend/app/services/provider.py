@@ -77,6 +77,16 @@ class ProviderService:
         if not key or len(key) < 8:
             return '*' * len(key)
         return key[:4] + '*' * (len(key) - 8) + key[-4:]
+
+    @staticmethod
+    def get_agent_kind(provider: dict) -> str:
+        """agent_cli 型 provider 对应的具体 CLI 类型（zcode/codex/...）。
+
+        约定 provider id 形如 "<kind>-cli"（如 zcode-cli）；未匹配时回退默认 zcode。
+        """
+        from app.gpt.agent_cli.registry import kind_from_provider_id
+
+        return kind_from_provider_id((provider or {}).get("id"))
     @staticmethod
     def add_provider( name: str, api_key: str, base_url: str, logo: str, type_: str, enabled: int = 1):
         try:
